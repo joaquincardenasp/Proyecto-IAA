@@ -2,16 +2,24 @@
 Parser — lee los 5 archivos Excel de input y construye DatosProblema.
 
 Orden de lectura:
-1. Catálogos (3 archivos) → union de cursos con semestres por plan
+1. Catálogos (3 archivos) → unión de cursos con semestres por carrera
 2. Salas especiales → mapeadas a cursos
 3. Profesores (hoja "profesores")
 4. Asignaciones (hoja "asignaciones") → crea Secciones
 5. Disponibilidad (hoja "disponibilidad") — OPCIONAL v1
+
+Diseño clave:
+- Los 3 planes de estudio comparten las mismas secciones y bloques.
+  Lo que cambia entre planes es en qué semestre cae un curso para RD1.
+- semestres_por_carrera acumula la UNIÓN de semestres de todos los planes.
+  Si PE2022 dice ICC-7 y PE2025 dice ICC-6, el curso queda con ICC-{"7","6"}.
+- Los semestres se guardan como STRINGS preservando sufijos de mención:
+  "9a", "9f", "10i" son semestres distintos (menciones distintas en ICI/IOC).
+  Esto evita topes falsos entre alumnos de distintas menciones.
 """
 from __future__ import annotations
 
 import math
-import re
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -31,8 +39,8 @@ CATALOGOS = [
     ("PE2026",      "Copia de Catálogo PE 2026.xlsx"),
 ]
 
-ARCHIVO_PROFESORES    = "profesores_completo.xlsx"
-ARCHIVO_SALAS         = "SALAS_ESPECIALES_ING.xlsx"
+ARCHIVO_PROFESORES = "profesores_completo.xlsx"
+ARCHIVO_SALAS      = "SALAS_ESPECIALES_ING.xlsx"
 
 CARRERAS_ESPECIALIDAD = ["ICI", "IOC", "ICE", "ICC", "ICA", "ICQ"]
 
@@ -40,18 +48,30 @@ CARRERAS_ESPECIALIDAD = ["ICI", "IOC", "ICE", "ICC", "ICA", "ICQ"]
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_semestre(val) -> Optional[int]:
-    """Convierte un valor de semestre (int, float o str como '9a', '10f') a int."""
-    if val is None or (isinstance(val, float) and math.isnan(val)):
+def _parse_semestre(val) -> Optional[str]:
+    """
+    Convierte un valor de semestre a string canónico, preservando sufijos de mención.
+
+    - int/float numérico positivo → str(int(val))  ej. 1.0 → "1"
+    - string que empieza con dígito → se mantiene tal cual  ej. "9a" → "9a"
+    - 0, NaN, None, '*', '\xa0', etc. → None (sin semestre)
+    """
+    if val is None:
         return None
-    if isinstance(val, (int, float)):
+    if isinstance(val, float):
+        if math.isnan(val):
+            return None
         v = int(val)
-        return v if v > 0 else None
-    # string: extraer el primer número
-    m = re.match(r"(\d+)", str(val).strip())
-    if m:
-        return int(m.group(1))
-    return None
+        return str(v) if v > 0 else None
+    if isinstance(val, int):
+        return str(val) if val > 0 else None
+    # string
+    s = str(val).strip()
+    if not s or s == "\xa0":
+        return None
+    if s[0].isdigit():
+        return s  # preservar "9a", "10f", "5hi", "9", etc.
+    return None   # '*' u otros caracteres no numéricos
 
 
 def _parse_horas(val) -> int:
@@ -62,12 +82,12 @@ def _parse_horas(val) -> int:
         val = val.strip()
         if not val or val == "\xa0":
             return 0
+        # Puede haber "2+1" → tomamos solo el primer número para v1
+        import re
         m = re.match(r"(\d+)", val)
         return int(m.group(1)) if m else 0
     if isinstance(val, float):
-        if math.isnan(val):
-            return 0
-        return int(val)
+        return 0 if math.isnan(val) else int(val)
     return int(val)
 
 
@@ -90,10 +110,14 @@ def _calcular_bloques_necesarios(horas: int) -> int:
 # ---------------------------------------------------------------------------
 
 def _leer_un_catalogo(path: Path, plan: str, cursos: dict[str, Curso]) -> None:
-    """Lee un archivo de catálogo y actualiza el dict de cursos."""
-    df = pd.read_excel(path, header=1)
+    """
+    Lee un archivo de catálogo y actualiza el dict de cursos.
 
-    # PE2026 tiene una columna extra 'Unnamed: 0' al inicio
+    Para cada curso:
+    - Agrega `plan` al set curso.planes
+    - Hace UNIÓN de semestres en curso.semestres_por_carrera
+    """
+    df = pd.read_excel(path, header=1)
     if "Unnamed: 0" in df.columns:
         df = df.drop(columns=["Unnamed: 0"])
 
@@ -102,54 +126,57 @@ def _leer_un_catalogo(path: Path, plan: str, cursos: dict[str, Curso]) -> None:
         if not codigo or codigo == "nan":
             continue
 
-        titulo = str(row.get("TITULO", "")).strip()
-        clases_h = _parse_horas(row.get("Clases"))
-        ayud_h   = _parse_horas(row.get("Ayudantías"))
-        lab_h    = _parse_horas(row.get("Laboratorios o Talleres"))
+        titulo    = str(row.get("TITULO", "")).strip()
+        clases_h  = _parse_horas(row.get("Clases"))
+        ayud_h    = _parse_horas(row.get("Ayudantías"))
+        lab_h     = _parse_horas(row.get("Laboratorios o Talleres"))
 
-        # Semestre: Plan Común tiene prioridad (ver CONTEXT.md §5)
+        # Semestre: Plan Común tiene prioridad (ver CONTEXT.md §5 y PRD §4)
         pc = _parse_semestre(row.get("Plan Común"))
 
-        if pc is not None and pc > 0:
-            semestres = {"Plan Común": pc}
+        if pc is not None:
+            # Curso de plan común: usar SOLO la columna "Plan Común"
+            semestres_nuevos: dict[str, str] = {"Plan Común": pc}
         else:
-            semestres = {}
+            # Curso de especialidad: leer columnas de carrera
+            semestres_nuevos = {}
             for carrera in CARRERAS_ESPECIALIDAD:
                 sem = _parse_semestre(row.get(carrera))
-                if sem is not None and sem > 0:
-                    semestres[carrera] = sem
+                if sem is not None:
+                    semestres_nuevos[carrera] = sem
 
-        # Incluir el curso aunque no tenga semestre asignado (cursos electivos, etc.)
-        # Solo omitir si el semestre ya existe para que no sobrescriba datos buenos
-
+        # Crear curso si no existe
         if codigo not in cursos:
             cursos[codigo] = Curso(
                 codigo=codigo,
                 titulo=titulo,
-                semestres_por_plan={},
                 clases_horas=clases_h,
                 ayudantias_horas=ayud_h,
                 laboratorios_horas=lab_h,
             )
         else:
-            # Actualizar horas solo si el curso ya existe y las horas son 0
-            curso = cursos[codigo]
-            if curso.clases_horas == 0 and clases_h > 0:
-                curso.clases_horas = clases_h
-            if curso.ayudantias_horas == 0 and ayud_h > 0:
-                curso.ayudantias_horas = ayud_h
-            if curso.laboratorios_horas == 0 and lab_h > 0:
-                curso.laboratorios_horas = lab_h
+            # Actualizar horas solo si el campo está vacío
+            c = cursos[codigo]
+            if c.clases_horas == 0 and clases_h > 0:
+                c.clases_horas = clases_h
+            if c.ayudantias_horas == 0 and ayud_h > 0:
+                c.ayudantias_horas = ayud_h
+            if c.laboratorios_horas == 0 and lab_h > 0:
+                c.laboratorios_horas = lab_h
 
-        cursos[codigo].semestres_por_plan[plan] = semestres
+        curso = cursos[codigo]
+        curso.planes.add(plan)
+
+        # Unión de semestres por carrera (acumula a través de planes)
+        for carrera, sem in semestres_nuevos.items():
+            curso.semestres_por_carrera.setdefault(carrera, set()).add(sem)
 
 
 def leer_catalogos(inputs_dir: Path) -> dict[str, Curso]:
     """Lee los 3 catálogos y retorna el dict unificado de cursos."""
     cursos: dict[str, Curso] = {}
     for plan, fname in CATALOGOS:
-        path = inputs_dir / fname
-        _leer_un_catalogo(path, plan, cursos)
+        _leer_un_catalogo(inputs_dir / fname, plan, cursos)
     return cursos
 
 
@@ -159,15 +186,12 @@ def leer_catalogos(inputs_dir: Path) -> dict[str, Curso]:
 
 def leer_salas_especiales(inputs_dir: Path) -> dict[str, str]:
     """Retorna {codigo_curso: nombre_sala}."""
-    path = inputs_dir / ARCHIVO_SALAS
-    df = pd.read_excel(path)
-    salas: dict[str, str] = {}
-    for _, row in df.iterrows():
-        codigo = str(row.get("CODIGO", "")).strip()
-        sala   = str(row.get("SALA ESPECIAL", "")).strip()
-        if codigo and sala and codigo != "nan":
-            salas[codigo] = sala
-    return salas
+    df = pd.read_excel(inputs_dir / ARCHIVO_SALAS)
+    return {
+        str(row["CODIGO"]).strip(): str(row["SALA ESPECIAL"]).strip()
+        for _, row in df.iterrows()
+        if str(row.get("CODIGO", "")).strip() not in ("", "nan")
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -205,12 +229,11 @@ def leer_asignaciones(xl: pd.ExcelFile, cursos: dict[str, Curso]) -> list[Seccio
         try:
             componente = TipoReunion[comp_s]
         except KeyError:
-            continue  # componente desconocido, ignorar
+            continue
 
-        # Calcular cuántos bloques necesita esta sección
         curso = cursos.get(codigo)
         if curso is None:
-            horas = 2  # fallback: 1 bloque de 2h
+            horas = 2
         else:
             if componente == TipoReunion.CLAS:
                 horas = curso.clases_horas
@@ -221,9 +244,8 @@ def leer_asignaciones(xl: pd.ExcelFile, cursos: dict[str, Curso]) -> list[Seccio
 
         n_bloques = _calcular_bloques_necesarios(horas)
 
-        sec_id = f"{codigo}-{seccion_id}-{comp_s}"
         secciones.append(Seccion(
-            id=sec_id,
+            id=f"{codigo}-{seccion_id}-{comp_s}",
             codigo_curso=codigo,
             seccion=seccion_id,
             componente=componente,
@@ -250,7 +272,7 @@ def leer_disponibilidad(xl: pd.ExcelFile) -> dict[str, list[dict]]:
         for _, row in df.iterrows():
             rut = str(row["rut_profesor"]).strip()
             disp.setdefault(rut, []).append({
-                "dia":          str(row["dia"]).strip(),
+                "dia":           str(row["dia"]).strip(),
                 "bloque_inicio": str(row["bloque_inicio"]).strip(),
                 "bloque_fin":    str(row["bloque_fin"]).strip(),
             })
@@ -264,36 +286,22 @@ def leer_disponibilidad(xl: pd.ExcelFile) -> dict[str, list[dict]]:
 # ---------------------------------------------------------------------------
 
 def cargar_datos(inputs_dir: str | Path) -> DatosProblema:
-    """
-    Lee los 5 archivos Excel y construye DatosProblema.
-
-    Imprime un resumen al final.
-    """
+    """Lee los 5 archivos Excel y construye DatosProblema. Imprime resumen."""
     inputs_dir = Path(inputs_dir)
 
-    # 1. Catálogos
     cursos = leer_catalogos(inputs_dir)
 
-    # 2. Salas especiales → asignar a cursos
     salas = leer_salas_especiales(inputs_dir)
     for codigo, sala in salas.items():
         if codigo in cursos:
             cursos[codigo].sala_especial = sala
 
-    # 3 & 4. Profesores + asignaciones
     xl = pd.ExcelFile(inputs_dir / ARCHIVO_PROFESORES)
     profesores = leer_profesores(xl)
     secciones  = leer_asignaciones(xl, cursos)
+    leer_disponibilidad(xl)  # cargado pero no usado en v1
 
-    # 5. Disponibilidad (opcional)
-    leer_disponibilidad(xl)  # cargada pero no usada en v1
-
-    datos = DatosProblema(
-        cursos=cursos,
-        secciones=secciones,
-        profesores=profesores,
-    )
-
+    datos = DatosProblema(cursos=cursos, secciones=secciones, profesores=profesores)
     _imprimir_resumen(datos)
     return datos
 
@@ -303,7 +311,7 @@ def cargar_datos(inputs_dir: str | Path) -> DatosProblema:
 # ---------------------------------------------------------------------------
 
 def _imprimir_resumen(datos: DatosProblema) -> None:
-    cursos = datos.cursos
+    cursos    = datos.cursos
     secciones = datos.secciones
     profesores = datos.profesores
 
@@ -311,29 +319,40 @@ def _imprimir_resumen(datos: DatosProblema) -> None:
     print("RESUMEN DEL PROBLEMA")
     print("=" * 60)
 
-    # Total cursos por plan
+    # Cursos por plan (usando campo planes)
     conteo_por_plan: dict[str, int] = {}
     for curso in cursos.values():
-        for plan in curso.semestres_por_plan:
+        for plan in curso.planes:
             conteo_por_plan[plan] = conteo_por_plan.get(plan, 0) + 1
+
     print(f"\nCursos únicos totales: {len(cursos)}")
     for plan, n in sorted(conteo_por_plan.items()):
         print(f"  {plan}: {n} cursos")
 
-    # Total secciones por componente
+    # Cursos con múltiples semestres en alguna carrera (efecto de planes distintos)
+    multi_sem = [
+        (c.codigo, carrera, sems)
+        for c in cursos.values()
+        for carrera, sems in c.semestres_por_carrera.items()
+        if len(sems) > 1
+    ]
+    if multi_sem:
+        print(f"\nCursos con semestre distinto según plan: {len(multi_sem)}")
+        for codigo, carrera, sems in sorted(multi_sem):
+            print(f"  {codigo} ({carrera}): {sorted(sems)}")
+
+    # Secciones por componente
     por_componente: dict[str, int] = {}
     for sec in secciones:
-        key = sec.componente.value
-        por_componente[key] = por_componente.get(key, 0) + 1
+        por_componente[sec.componente.value] = por_componente.get(sec.componente.value, 0) + 1
     print(f"\nSecciones totales: {len(secciones)}")
     for comp, n in sorted(por_componente.items()):
         print(f"  {comp}: {n}")
 
-    # Total profesores por tipo
+    # Profesores por tipo
     por_tipo: dict[str, int] = {}
     for prof in profesores.values():
-        key = prof.tipo.value
-        por_tipo[key] = por_tipo.get(key, 0) + 1
+        por_tipo[prof.tipo.value] = por_tipo.get(prof.tipo.value, 0) + 1
     print(f"\nProfesores totales: {len(profesores)}")
     for tipo, n in sorted(por_tipo.items()):
         print(f"  {tipo}: {n}")
@@ -349,9 +368,7 @@ def _imprimir_resumen(datos: DatosProblema) -> None:
         for n_bloques, cnt in sorted(resumen_multi.items()):
             print(f"  {n_bloques} bloques: {cnt} secciones")
 
-    # AYUD con afecta_disponibilidad=False
     ayud_no_afecta = [s for s in secciones
                       if s.componente == TipoReunion.AYUD and not s.afecta_disponibilidad]
     print(f"\nAYUD con afecta_disponibilidad=False: {len(ayud_no_afecta)}")
-
     print("=" * 60)

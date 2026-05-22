@@ -35,10 +35,14 @@ class Profesor:
 class Curso:
     codigo: str
     titulo: str
-    # {plan: {carrera: semestre}}
-    # plan ∈ {"PE2022", "PE2022_2025", "PE2026"}
-    # carrera ∈ {"Plan Común", "ICI", "IOC", "ICE", "ICC", "ICA"}
-    semestres_por_plan: dict[str, dict[str, int]] = field(default_factory=dict)
+    # Unión de semestres por carrera a través de los 3 planes de estudio.
+    # carrera ∈ {"Plan Común", "ICI", "IOC", "ICE", "ICC", "ICA", "ICQ"}
+    # semestre es un STRING que preserva sufijos de mención: "9a", "10f", "1", etc.
+    # Un mismo curso puede pertenecer a múltiples semestres de una carrera si
+    # los planes difieren (ej. ICC-"7" en PE2022 y ICC-"6" en PE2025).
+    semestres_por_carrera: dict[str, set[str]] = field(default_factory=dict)
+    # Planes en los que aparece este curso (para reportes y conteo)
+    planes: set[str] = field(default_factory=set)
     clases_horas: int = 0
     ayudantias_horas: int = 0
     laboratorios_horas: int = 0
