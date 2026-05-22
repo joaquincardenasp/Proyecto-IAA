@@ -2,22 +2,23 @@
 solver_cpsat.py — Fase 1: restricciones duras via CP-SAT.
 
 Implementación incremental (PRD §8):
-  Paso 2 (ACTUAL): RD1 solo Plan Común + RC (sincronización de secciones)
-  Paso 3:          RD1 + ICI
-  Paso 4:          RD1 + IOC, ICE, ICC, ICA
-  Paso 5:          Múltiples bloques por sección
-  Paso 6:          RD3, RD4, RD7, RD8
+  Paso 2:  RD1 solo Plan Común + RC (sincronización de secciones)
+  Paso 3:  RD1 + ICI
+  Paso 4:  RD1 + IOC, ICE, ICC, ICA, ICQ
+  Paso 5:  Múltiples bloques por sección (ACTUAL)
+  Paso 6:  RD3, RD4, RD7, RD8
 
 RD1 — Sin topes mismo semestre/carrera:
   Cursos DISTINTOS del mismo (carrera, semestre) no pueden tener bloques solapados.
-  RD1 aplica SOLO entre cursos distintos; secciones del mismo curso no se restringen
-  entre sí por RD1 (son grupos paralelos de alumnos distintos).
+  Aplica entre TODOS los bloques de s1 y TODOS los bloques de s2.
 
 RC — Restricción de paralelismo de secciones del mismo curso:
-  1. Sincronización: todas las secciones CLAS del mismo curso van al mismo bloque.
-     Ídem para AYUD y LABT. (Práctica normal de la universidad.)
-  2. No solapamiento intra-curso: los bloques de CLAS, AYUD y LABT del mismo curso
-     deben ser mutuamente no solapados (los alumnos de cada sección asisten a los tres).
+  1. Sincronización: todas las secciones CLAS del mismo curso van a los mismos bloques
+     (igualdad posicional). Ídem para AYUD y LABT.
+  2. No solapamiento intra-curso: ningún bloque de CLAS puede solapar con ningún
+     bloque de AYUD o LABT del mismo curso.
+
+Intra-sección: los bloques asignados a la misma sección no pueden solaparse entre sí.
 
 Solapamiento: verificado por sub-bloques (MATRIZ_SOLAPAMIENTO), NO por igualdad de índice.
 """
@@ -38,10 +39,11 @@ from .models import DatosProblema, TipoReunion
 
 @dataclass
 class ResultadoSolver:
-    asignaciones: dict[str, int] = field(default_factory=dict)
+    asignaciones: dict[str, list[int]] = field(default_factory=dict)  # sec_id → [bloque_idx, ...]
     estado: str = "UNKNOWN"
-    n_rd1: int = 0   # restricciones RD1 agregadas
-    n_rc: int = 0    # restricciones RC (sincronización + no solapamiento intra-curso)
+    n_rd1: int = 0
+    n_rc: int = 0
+    n_intra: int = 0   # no-solapamiento intra-sección
 
 
 # ---------------------------------------------------------------------------
@@ -62,19 +64,16 @@ _PARES_SOLAPAN: list[tuple[int, int]] = [
 
 def _agregar_rc(
     model: cp_model.CpModel,
-    x: dict[str, cp_model.IntVar],
+    x: dict[str, list[cp_model.IntVar]],
     secciones: list,
 ) -> int:
     """
-    Para cada curso en el modelo:
-      - Sincroniza todas sus secciones CLAS al mismo bloque (id1 == id2 == ...).
-        Ídem para AYUD y LABT.
-      - Agrega no-solapamiento entre bloques de distintos componentes del mismo curso:
-        CLAS ↔ AYUD, CLAS ↔ LABT, AYUD ↔ LABT.
-
-    Retorna el número de restricciones agregadas.
+    Para cada curso:
+      1. Sincroniza todas sus secciones CLAS a los mismos bloques (igualdad posicional).
+         Ídem para AYUD y LABT.
+      2. Prohíbe solapamiento entre cualquier bloque de CLAS y cualquier bloque de
+         AYUD o LABT del mismo curso.
     """
-    # Agrupar por (codigo_curso, componente)
     grupos: dict[tuple, list] = defaultdict(list)
     for s in secciones:
         if s.id in x:
@@ -84,8 +83,7 @@ def _agregar_rc(
     n = 0
 
     for codigo in codigos:
-        # Obtener el representante de cada componente (primera sección del tipo)
-        rep: dict[TipoReunion, cp_model.IntVar] = {}
+        rep: dict[TipoReunion, list[cp_model.IntVar]] = {}
 
         for comp in TipoReunion:
             secs = grupos.get((codigo, comp), [])
@@ -93,20 +91,20 @@ def _agregar_rc(
                 continue
             rep[comp] = x[secs[0].id]
 
-            # 1. Sincronización: todas las secciones del mismo componente → mismo bloque
+            # Sincronización posicional
             for s in secs[1:]:
-                model.Add(rep[comp] == x[s.id])
-                n += 1
+                for k, var in enumerate(rep[comp]):
+                    model.Add(var == x[s.id][k])
+                    n += 1
 
-        # 2. No solapamiento entre distintos componentes del mismo curso
+        # No solapamiento entre componentes distintos
         componentes = list(rep.keys())
         for i in range(len(componentes)):
             for j in range(i + 1, len(componentes)):
-                model.AddForbiddenAssignments(
-                    [rep[componentes[i]], rep[componentes[j]]],
-                    _PARES_SOLAPAN,
-                )
-                n += 1
+                for vi in rep[componentes[i]]:
+                    for vj in rep[componentes[j]]:
+                        model.AddForbiddenAssignments([vi, vj], _PARES_SOLAPAN)
+                        n += 1
 
     return n
 
@@ -121,17 +119,17 @@ def resolver(
     tiempo_limite_s: float = 60.0,
 ) -> ResultadoSolver:
     """
-    Asigna 1 bloque por sección aplicando RD1 (para las carreras indicadas) y RC.
+    Asigna bloques a cada sección aplicando intra-sección, RC y RD1.
 
     Args:
-        carreras:  Carreras a restringir con RD1. Por defecto ["Plan Común"] (paso 2).
+        carreras: Carreras a restringir con RD1. Por defecto ["Plan Común"].
     """
     if carreras is None:
         carreras = ["Plan Común"]
 
     model = cp_model.CpModel()
 
-    # 1. Secciones en el modelo (cursos que pertenecen a alguna carrera restringida)
+    # 1. Secciones en el modelo
     codigos_restringidos = {
         c.codigo
         for c in datos.cursos.values()
@@ -139,16 +137,28 @@ def resolver(
     }
     secciones = [s for s in datos.secciones if s.codigo_curso in codigos_restringidos]
 
-    # 2. Variables
-    x: dict[str, cp_model.IntVar] = {
-        s.id: model.NewIntVar(0, N_BLOQUES - 1, s.id)
+    # 2. Variables: lista de IntVars por sección (una por bloque necesario)
+    x: dict[str, list[cp_model.IntVar]] = {
+        s.id: [
+            model.NewIntVar(0, N_BLOQUES - 1, f"{s.id}_b{k}")
+            for k in range(s.cantidad_bloques_necesarios)
+        ]
         for s in secciones
     }
 
-    # 3. RC: sincronización + no solapamiento intra-curso
+    # 3. Intra-sección: los bloques de la misma sección no pueden solaparse
+    n_intra = 0
+    for s in secciones:
+        vars_ = x[s.id]
+        for k1 in range(len(vars_)):
+            for k2 in range(k1 + 1, len(vars_)):
+                model.AddForbiddenAssignments([vars_[k1], vars_[k2]], _PARES_SOLAPAN)
+                n_intra += 1
+
+    # 4. RC: sincronización + no solapamiento intra-curso
     n_rc = _agregar_rc(model, x, secciones)
 
-    # 4. RD1: pares de secciones de CURSOS DISTINTOS en el mismo (carrera, semestre)
+    # 5. RD1: pares de secciones de CURSOS DISTINTOS en el mismo (carrera, semestre)
     n_rd1 = 0
     for carrera in carreras:
         grupos: dict[str, list] = defaultdict(list)
@@ -165,12 +175,12 @@ def resolver(
                     s1, s2 = secs[i], secs[j]
                     if s1.codigo_curso == s2.codigo_curso:
                         continue
-                    model.AddForbiddenAssignments(
-                        [x[s1.id], x[s2.id]], _PARES_SOLAPAN
-                    )
-                    n_rd1 += 1
+                    for v1 in x[s1.id]:
+                        for v2 in x[s2.id]:
+                            model.AddForbiddenAssignments([v1, v2], _PARES_SOLAPAN)
+                            n_rd1 += 1
 
-    # 5. Resolver
+    # 6. Resolver
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = tiempo_limite_s
     status_code = solver.Solve(model)
@@ -184,13 +194,17 @@ def resolver(
     estado = _STATUS.get(status_code, "UNKNOWN")
 
     if status_code not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return ResultadoSolver(estado=estado, n_rd1=n_rd1, n_rc=n_rc)
+        return ResultadoSolver(estado=estado, n_rd1=n_rd1, n_rc=n_rc, n_intra=n_intra)
 
     return ResultadoSolver(
-        asignaciones={sec_id: solver.Value(var) for sec_id, var in x.items()},
+        asignaciones={
+            sec_id: [solver.Value(v) for v in vars_]
+            for sec_id, vars_ in x.items()
+        },
         estado=estado,
         n_rd1=n_rd1,
         n_rc=n_rc,
+        n_intra=n_intra,
     )
 
 
@@ -200,7 +214,7 @@ def resolver(
 
 def verificar_topes(
     datos: DatosProblema,
-    asignaciones: dict[str, int],
+    asignaciones: dict[str, list[int]],
     carrera: str,
 ) -> list[tuple[str, str, str]]:
     """
@@ -227,7 +241,9 @@ def verificar_topes(
                 s1, s2 = sec_by_id[id1], sec_by_id[id2]
                 if s1.codigo_curso == s2.codigo_curso:
                     continue
-                if MATRIZ_SOLAPAMIENTO[asignaciones[id1]][asignaciones[id2]]:
+                bloques1 = asignaciones[id1]
+                bloques2 = asignaciones[id2]
+                if any(MATRIZ_SOLAPAMIENTO[b1][b2] for b1 in bloques1 for b2 in bloques2):
                     topes.append((id1, id2, sem))
 
     return topes
@@ -235,17 +251,16 @@ def verificar_topes(
 
 def verificar_rc(
     datos: DatosProblema,
-    asignaciones: dict[str, int],
+    asignaciones: dict[str, list[int]],
 ) -> dict[str, list]:
     """
     Verifica las restricciones RC en la solución. Retorna dict con violaciones:
-      "desync":    [(sec1_id, sec2_id)] pares del mismo curso/componente con bloques distintos
-      "solapan":   [(sec1_id, sec2_id)] pares de distintos componentes del mismo curso que solapan
+      "desync":  [(sec1_id, sec2_id)] pares del mismo curso/componente con bloques distintos
+      "solapan": [(sec1_id, sec2_id)] pares de distintos componentes del mismo curso que solapan
     """
     sec_by_id = {s.id: s for s in datos.secciones}
     asig_secs = [sec_by_id[sid] for sid in asignaciones if sid in sec_by_id]
 
-    # Agrupar por (codigo_curso, componente)
     por_cc: dict[tuple, list[str]] = defaultdict(list)
     for s in asig_secs:
         por_cc[(s.codigo_curso, s.componente)].append(s.id)
@@ -255,27 +270,42 @@ def verificar_rc(
     solapan: list[tuple] = []
 
     for codigo in codigos:
-        # Verificar sincronización: todas las secciones del mismo componente → mismo bloque
         for comp in TipoReunion:
             ids = por_cc.get((codigo, comp), [])
             if len(ids) < 2:
                 continue
-            bloque_ref = asignaciones[ids[0]]
+            bloques_ref = asignaciones[ids[0]]
             for sid in ids[1:]:
-                if asignaciones[sid] != bloque_ref:
+                if asignaciones[sid] != bloques_ref:
                     desync.append((ids[0], sid))
 
-        # Verificar no solapamiento entre componentes distintos
         comps_presentes = [c for c in TipoReunion if (codigo, c) in por_cc]
         for i in range(len(comps_presentes)):
             for j in range(i + 1, len(comps_presentes)):
                 c1, c2 = comps_presentes[i], comps_presentes[j]
                 sid1 = por_cc[(codigo, c1)][0]
                 sid2 = por_cc[(codigo, c2)][0]
-                if MATRIZ_SOLAPAMIENTO[asignaciones[sid1]][asignaciones[sid2]]:
+                bloques1 = asignaciones[sid1]
+                bloques2 = asignaciones[sid2]
+                if any(MATRIZ_SOLAPAMIENTO[b1][b2] for b1 in bloques1 for b2 in bloques2):
                     solapan.append((sid1, sid2))
 
     return {"desync": desync, "solapan": solapan}
+
+
+def verificar_intra(
+    asignaciones: dict[str, list[int]],
+) -> list[tuple[str, int, int]]:
+    """
+    Retorna (sec_id, bloque_a, bloque_b) de cada solapamiento intra-sección.
+    """
+    violaciones = []
+    for sec_id, bloques in asignaciones.items():
+        for k1 in range(len(bloques)):
+            for k2 in range(k1 + 1, len(bloques)):
+                if MATRIZ_SOLAPAMIENTO[bloques[k1]][bloques[k2]]:
+                    violaciones.append((sec_id, bloques[k1], bloques[k2]))
+    return violaciones
 
 
 # ---------------------------------------------------------------------------
@@ -288,18 +318,22 @@ def imprimir_resultado(datos: DatosProblema, resultado: ResultadoSolver) -> None
     print("=" * 60)
     print(f"Estado:               {resultado.estado}")
     print(f"Secciones asignadas:  {len(resultado.asignaciones)}")
+    total_bloques = sum(len(b) for b in resultado.asignaciones.values())
+    print(f"Bloques totales:      {total_bloques}")
     print(f"Restricciones RD1:    {resultado.n_rd1}")
     print(f"Restricciones RC:     {resultado.n_rc}")
+    print(f"Restricciones intra:  {resultado.n_intra}")
 
     if not resultado.asignaciones:
         return
 
     conteo: dict[int, int] = defaultdict(int)
-    for idx in resultado.asignaciones.values():
-        conteo[idx] += 1
+    for bloques in resultado.asignaciones.values():
+        for idx in bloques:
+            conteo[idx] += 1
 
     print("\nDistribución por bloque:")
     for bloque_idx in sorted(conteo):
         b = TODOS_BLOQUES[bloque_idx]
         print(f"  {b.dia.value} {b.hora_inicio}-{b.hora_fin} ({b.tipo}): "
-              f"{conteo[bloque_idx]} sección(es)")
+              f"{conteo[bloque_idx]} asignación(es)")
