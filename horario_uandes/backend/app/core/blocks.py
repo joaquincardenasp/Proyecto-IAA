@@ -24,18 +24,18 @@ _SUB_INICIO_MIN = [_min(t) for t in [
 ]]
 
 # Definición de bloques: (hora_inicio, hora_fin, tipo)
+# Hay pausa de almuerzo 12:30–13:20; el bloque de tarde empieza en 13:30.
+# No existe ningún bloque de 2h que empiece a las 12:30 o 14:30.
 _BLOQUES_DEF: list[tuple[str, str, str]] = [
-    # 7 bloques de 2h
+    # 5 bloques de 2h
     ("8:30",  "10:20", "2h"),
     ("10:30", "12:20", "2h"),
-    ("12:30", "14:20", "2h"),
-    ("14:30", "16:20", "2h"),
+    ("13:30", "15:20", "2h"),   # primer bloque de tarde, tras el almuerzo
     ("15:30", "17:20", "2h"),
-    ("16:30", "18:20", "2h"),
     ("17:30", "19:20", "2h"),
-    # 2 bloques de 3h
-    ("10:30", "13:20", "3h"),
-    ("12:30", "15:20", "3h"),
+    # 2 bloques de 3h (cruzan el horario de almuerzo)
+    ("10:30", "13:20", "3h"),   # sub-bloques: 10:30, 11:30, 12:30
+    ("12:30", "15:20", "3h"),   # sub-bloques: 12:30, 13:30, 14:30
 ]
 
 BLOQUES_2H = [d for d in _BLOQUES_DEF if d[2] == "2h"]
@@ -73,7 +73,7 @@ class BloqueHorario:
 
 
 def generar_bloques_horarios() -> list[BloqueHorario]:
-    """Genera los 45 bloques horarios (9 slots × 5 días)."""
+    """Genera los 35 bloques horarios (7 slots × 5 días)."""
     bloques: list[BloqueHorario] = []
     idx = 0
     for dia in Dia:
