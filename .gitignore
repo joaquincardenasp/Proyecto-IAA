@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*/__pycache__/
+
+# Virtual environments
+venv/
+.env/
+
+# Excel files
+*.xlsx
+
+CLAUDE.md
+PRD.md
+CONTEXT.md
+horario_uandes/backend/tests
