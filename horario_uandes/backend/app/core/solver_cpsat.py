@@ -231,7 +231,8 @@ def resolver(
     Asigna bloques a cada sección aplicando todas las restricciones duras.
 
     Args:
-        carreras: Carreras a restringir con RD1. Por defecto ["Plan Común"].
+        carreras:        Carreras a restringir con RD1. Por defecto ["Plan Común"].
+        tiempo_limite_s: Tiempo máximo en segundos.
     """
     if carreras is None:
         carreras = ["Plan Común"]
