@@ -1,0 +1,30 @@
+# Caché de Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# Control de versiones
+.git/
+.gitignore
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Archivos de datos (se suben en runtime vía /api/upload)
+inputs/*
+outputs/*
+
+# Tests (no se necesitan en producción)
+tests/
+
+# Misceláneos
+*.md
+.env
+*.egg-info/
+dist/
+build/

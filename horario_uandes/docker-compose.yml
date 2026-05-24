@@ -1,0 +1,32 @@
+services:
+
+  # ── Backend: FastAPI + OR-Tools + DEAP ──────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistir los archivos Excel subidos y los resultados generados.
+      # Sin estos volúmenes los datos se pierden al reiniciar el contenedor.
+      - inputs_data:/app/inputs
+      - outputs_data:/app/outputs
+    restart: unless-stopped
+
+  # ── Frontend: React (nginx) ──────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "80:80"
+    environment:
+      # nginx usa esta variable para el proxy_pass al backend.
+      # El nombre "backend" es el hostname interno de Docker Compose.
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  inputs_data:
+  outputs_data:
