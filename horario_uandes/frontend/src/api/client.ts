@@ -1,6 +1,9 @@
 import type { SolveResult, StatusResponse } from '../types'
 
-const BASE = '/api'
+// En desarrollo: BASE = '/api'  →  Vite proxea a http://localhost:8000/api
+// En producción: BASE = 'https://tu-backend.onrender.com/api'
+//   (Render Static Site → Environment Variable: VITE_API_BASE_URL=https://tu-backend.onrender.com)
+const BASE = `${import.meta.env.VITE_API_BASE_URL ?? ''}/api`
 
 export async function uploadFiles(files: File[]): Promise<{ uploaded: string[] }> {
   const fd = new FormData()
