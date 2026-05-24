@@ -25,14 +25,22 @@ const DIAS_LABEL: Record<Dia, string> = {
   L: 'Lunes', M: 'Martes', X: 'Miércoles', J: 'Jueves', V: 'Viernes',
 }
 
-// Paleta monocromática rojo/gris — sin colores arco iris
+// Estilo base por tipo (borde izquierdo + fondo + texto)
 const TIPO_CARD: Record<TipoSeccion, string> = {
-  CLAS: 'bg-red-50 border-l-[3px] border-red-700 text-red-950',
-  AYUD: 'bg-gray-100 border-l-[3px] border-gray-500 text-gray-900',
+  CLAS: 'bg-red-50   border-l-[3px] border-red-700   text-red-950',
+  AYUD: 'bg-gray-100 border-l-[3px] border-gray-500  text-gray-900',
   LABT: 'bg-stone-100 border-l-[3px] border-stone-600 text-stone-900',
 }
+
+// Color del separador horizontal entre secciones paralelas
+const TIPO_DIVIDER: Record<TipoSeccion, string> = {
+  CLAS: 'border-red-200',
+  AYUD: 'border-gray-300',
+  LABT: 'border-stone-300',
+}
+
 const TIPO_TAG: Record<TipoSeccion, string> = {
-  CLAS: 'bg-red-100 text-red-800',
+  CLAS: 'bg-red-100  text-red-800',
   AYUD: 'bg-gray-200 text-gray-700',
   LABT: 'bg-stone-200 text-stone-700',
 }
@@ -46,11 +54,6 @@ const CARRERAS = ['Plan Común', 'ICI', 'IOC', 'ICE', 'ICC', 'ICA', 'ICQ']
 
 // ── Helpers de semestre ───────────────────────────────────────────────────────
 
-/**
- * Extrae los semestres que una sección tiene para una carrera concreta.
- * carreras = "Plan Común · ICI"  y  semestres = "1/2 · 5"
- * getSemestresForCarrera(sec, "Plan Común") → ["1", "2"]
- */
 function getSemestresForCarrera(sec: SeccionAsignada, carrera: string): string[] {
   const cars = sec.carreras.split(' · ')
   const sems = sec.semestres.split(' · ')
@@ -59,30 +62,44 @@ function getSemestresForCarrera(sec: SeccionAsignada, carrera: string): string[]
   return sems[idx]?.split('/').map(s => s.trim()).filter(Boolean) ?? []
 }
 
-/**
- * Ordena semestres igual que el backend: "1" < "2" < … < "9a" < "9f" < "10"
- */
 function semSortKey(s: string): [number, string] {
   const digits = s.replace(/\D/g, '')
   return [digits ? parseInt(digits, 10) : 999, s]
 }
-
 function compareSems(a: string, b: string): number {
   const [na, sa] = semSortKey(a)
   const [nb, sb] = semSortKey(b)
   return na !== nb ? na - nb : sa.localeCompare(sb)
 }
 
-/** Etiqueta legible para un semestre: "1" → "1.°", "9a" → "9a" */
-function semLabel(s: string): string {
-  return `Sem. ${s}`
+// ── Agrupación de celdas ──────────────────────────────────────────────────────
+//
+// Agrupa las secciones de una celda por codigo_curso preservando orden
+// de primera aparición.
+//
+//   Mismo curso → un grupo  → indicador visual de paralelismo
+//   Cursos distintos → grupos distintos → apilados verticalmente
+
+function groupByCourse(secs: SeccionAsignada[]): SeccionAsignada[][] {
+  const groups: SeccionAsignada[][] = []
+  const index  = new Map<string, number>()
+  for (const sec of secs) {
+    const i = index.get(sec.codigo)
+    if (i !== undefined) {
+      groups[i].push(sec)
+    } else {
+      index.set(sec.codigo, groups.length)
+      groups.push([sec])
+    }
+  }
+  return groups
 }
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
 interface Filters {
-  carrera:  string          // '' = todas las carreras
-  semestre: string          // '' = todos los semestres (solo aplica si carrera ≠ '')
+  carrera:  string
+  semestre: string
   tipo:     TipoSeccion | ''
   texto:    string
 }
@@ -102,19 +119,12 @@ function buildGrid(secciones: SeccionAsignada[], filters: Filters): GridMap {
   const q = filters.texto.toLowerCase()
 
   for (const sec of secciones) {
-    // Filtro tipo
     if (filters.tipo && sec.tipo !== filters.tipo) continue
-
-    // Filtro carrera
     if (filters.carrera && !sec.carreras.includes(filters.carrera)) continue
-
-    // Filtro semestre (solo cuando hay carrera seleccionada)
     if (filters.carrera && filters.semestre) {
       const sems = getSemestresForCarrera(sec, filters.carrera)
       if (!sems.includes(filters.semestre)) continue
     }
-
-    // Filtro texto libre
     if (q && ![sec.codigo, sec.titulo, sec.profesor, sec.seccion]
         .join(' ').toLowerCase().includes(q)) continue
 
@@ -136,15 +146,12 @@ export default function HorarioGrid({ secciones }: Props) {
   })
   const [selected, setSelected] = useState<SeccionAsignada | null>(null)
 
-  // Semestres disponibles para la carrera actualmente seleccionada
   const availableSems = useMemo(() => {
     if (!filters.carrera) return []
     const set = new Set<string>()
-    for (const sec of secciones) {
-      for (const s of getSemestresForCarrera(sec, filters.carrera)) {
+    for (const sec of secciones)
+      for (const s of getSemestresForCarrera(sec, filters.carrera))
         set.add(s)
-      }
-    }
     return Array.from(set).sort(compareSems)
   }, [secciones, filters.carrera])
 
@@ -156,45 +163,33 @@ export default function HorarioGrid({ secciones }: Props) {
   }, [grid])
 
   function setCarrera(car: string) {
-    // Resetear semestre al cambiar carrera
     setFilters(f => ({ ...f, carrera: car, semestre: '' }))
-  }
-
-  function setSemestre(sem: string) {
-    setFilters(f => ({ ...f, semestre: sem }))
   }
 
   return (
     <div className="flex flex-col gap-5">
 
-      {/* ── Panel de filtros ───────────────────────────────────────────────── */}
+      {/* ── Filtros ────────────────────────────────────────────────────────── */}
       <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
 
-        {/* Fila 1 — Tabs de carrera */}
+        {/* Carreras */}
         <div className="flex flex-wrap gap-1.5">
-          <TabBtn
-            active={filters.carrera === ''}
-            onClick={() => setCarrera('')}
-          >
+          <TabBtn active={filters.carrera === ''} onClick={() => setCarrera('')}>
             Todas las carreras
           </TabBtn>
           {CARRERAS.map(car => (
-            <TabBtn
-              key={car}
-              active={filters.carrera === car}
-              onClick={() => setCarrera(car)}
-            >
+            <TabBtn key={car} active={filters.carrera === car} onClick={() => setCarrera(car)}>
               {car}
             </TabBtn>
           ))}
         </div>
 
-        {/* Fila 2 — Tabs de semestre (solo cuando hay carrera seleccionada) */}
+        {/* Semestres */}
         {filters.carrera !== '' && availableSems.length > 0 && (
           <div className="flex flex-wrap gap-1.5 pt-0.5 border-t border-gray-100">
             <TabBtn
               active={filters.semestre === ''}
-              onClick={() => setSemestre('')}
+              onClick={() => setFilters(f => ({ ...f, semestre: '' }))}
               secondary
             >
               Todos los semestres
@@ -203,18 +198,17 @@ export default function HorarioGrid({ secciones }: Props) {
               <TabBtn
                 key={sem}
                 active={filters.semestre === sem}
-                onClick={() => setSemestre(sem)}
+                onClick={() => setFilters(f => ({ ...f, semestre: sem }))}
                 secondary
               >
-                {semLabel(sem)}
+                Sem. {sem}
               </TabBtn>
             ))}
           </div>
         )}
 
-        {/* Fila 3 — Tipo + búsqueda */}
+        {/* Tipo + búsqueda */}
         <div className="flex flex-wrap items-center gap-3 pt-0.5 border-t border-gray-100">
-          {/* Tipo */}
           <div className="flex gap-1">
             {(['', 'CLAS', 'AYUD', 'LABT'] as const).map(t => (
               <button
@@ -222,13 +216,10 @@ export default function HorarioGrid({ secciones }: Props) {
                 onClick={() => setFilters(f => ({ ...f, tipo: t as TipoSeccion | '' }))}
                 className={`px-2.5 py-1 text-xs rounded transition-colors
                   ${filters.tipo === t
-                    ? t === ''
-                      ? 'bg-gray-800 text-white'
-                      : t === 'CLAS'
-                        ? 'bg-red-700 text-white'
-                        : t === 'AYUD'
-                          ? 'bg-gray-500 text-white'
-                          : 'bg-stone-600 text-white'
+                    ? t === ''     ? 'bg-gray-800 text-white'
+                    : t === 'CLAS' ? 'bg-red-700 text-white'
+                    : t === 'AYUD' ? 'bg-gray-500 text-white'
+                                   : 'bg-stone-600 text-white'
                     : 'border border-gray-200 text-gray-500 hover:border-gray-300'
                   }`}
               >
@@ -237,7 +228,6 @@ export default function HorarioGrid({ secciones }: Props) {
             ))}
           </div>
 
-          {/* Búsqueda */}
           <div className="flex items-center gap-2 flex-1 min-w-48 border border-gray-200
                           rounded px-3 py-1.5 focus-within:border-gray-400 transition-colors">
             <Search size={13} className="text-gray-400 shrink-0" />
@@ -256,7 +246,6 @@ export default function HorarioGrid({ secciones }: Props) {
             )}
           </div>
 
-          {/* Contador */}
           <span className="text-xs text-gray-400 ml-auto shrink-0 tabular-nums">
             {total} secciones
           </span>
@@ -265,21 +254,15 @@ export default function HorarioGrid({ secciones }: Props) {
 
       {/* ── Grilla ─────────────────────────────────────────────────────────── */}
       <div className="overflow-x-auto rounded-lg border border-gray-200">
-        <table
-          className="w-full border-collapse bg-white text-sm"
-          style={{ minWidth: 860 }}
-        >
+        <table className="w-full border-collapse bg-white text-sm" style={{ minWidth: 860 }}>
           <thead>
             <tr>
               <th className="w-20 bg-gray-800 text-white text-xs font-medium p-3 text-left">
                 Hora
               </th>
               {DIAS.map(d => (
-                <th
-                  key={d.key}
-                  className="bg-[#B71C1C] text-white text-xs font-semibold p-3
-                             text-center w-1/5"
-                >
+                <th key={d.key}
+                    className="bg-[#B71C1C] text-white text-xs font-semibold p-3 text-center w-1/5">
                   {d.label}
                 </th>
               ))}
@@ -287,36 +270,18 @@ export default function HorarioGrid({ secciones }: Props) {
           </thead>
           <tbody>
             {FRANJAS.map((franja, fi) => (
-              <tr
-                key={franja.hora}
-                className={fi % 2 === 0 ? 'bg-white' : 'bg-gray-50/60'}
-              >
+              <tr key={franja.hora} className={fi % 2 === 0 ? 'bg-white' : 'bg-gray-50/60'}>
                 <td className="p-2 pr-3 text-right border-r border-gray-200 align-top">
-                  <span className="text-xs font-medium text-gray-400">
-                    {franja.label}
-                  </span>
+                  <span className="text-xs font-medium text-gray-400">{franja.label}</span>
                 </td>
                 {DIAS.map(d => {
                   const secs = grid.get(d.key)?.get(franja.hora) ?? []
                   return (
-                    <td
-                      key={d.key}
-                      className="p-1 align-top border-l border-gray-100"
-                    >
-                      {secs.length > 0 ? (
-                        <div className="space-y-1">
-                          {secs.map(sec => (
-                            <SeccionCard
-                              key={sec.id + franja.hora}
-                              sec={sec}
-                              isSelected={selected?.id === sec.id}
-                              onClick={() => setSelected(sec === selected ? null : sec)}
-                            />
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="h-8" />
-                      )}
+                    <td key={d.key} className="p-1 align-top border-l border-gray-100">
+                      {secs.length > 0
+                        ? <CellContent secs={secs} selected={selected} onSelect={setSelected} />
+                        : <div className="h-8" />
+                      }
                     </td>
                   )
                 })}
@@ -326,12 +291,9 @@ export default function HorarioGrid({ secciones }: Props) {
         </table>
       </div>
 
-      {/* ── Detalle al hacer click ─────────────────────────────────────────── */}
+      {/* ── Detalle ────────────────────────────────────────────────────────── */}
       {selected && (
-        <SeccionDetail
-          sec={selected}
-          onClose={() => setSelected(null)}
-        />
+        <SeccionDetail sec={selected} onClose={() => setSelected(null)} />
       )}
 
       {/* ── Leyenda ────────────────────────────────────────────────────────── */}
@@ -348,48 +310,117 @@ export default function HorarioGrid({ secciones }: Props) {
   )
 }
 
-// ── Sub-componentes ───────────────────────────────────────────────────────────
+// ── CellContent ───────────────────────────────────────────────────────────────
+//
+// Lógica de renderizado de una celda:
+//   1. Agrupa secciones por curso (groupByCourse)
+//   2. Grupo de 1 sección  → SeccionCard normal
+//   3. Grupo de N secciones del mismo curso → GroupBlock (indicador de paralelismo)
+//   4. Los grupos se apilan verticalmente
 
-/** Botón de tab reutilizable para carrera y semestre */
-function TabBtn({
-  children, active, onClick, secondary = false,
+function CellContent({
+  secs, selected, onSelect,
 }: {
-  children: React.ReactNode
-  active: boolean
-  onClick: () => void
-  secondary?: boolean
+  secs:     SeccionAsignada[]
+  selected: SeccionAsignada | null
+  onSelect: (sec: SeccionAsignada | null) => void
 }) {
-  if (active) {
-    return (
-      <button
-        onClick={onClick}
-        className={`px-3 py-1.5 text-xs font-medium rounded transition-colors
-          ${secondary
-            ? 'bg-gray-700 text-white'
-            : 'bg-[#B71C1C] text-white'
-          }`}
-      >
-        {children}
-      </button>
-    )
-  }
+  const groups = groupByCourse(secs)
+
   return (
-    <button
-      onClick={onClick}
-      className="px-3 py-1.5 text-xs font-medium rounded border border-gray-200
-                 text-gray-600 hover:border-gray-300 hover:bg-gray-50 transition-colors"
-    >
-      {children}
-    </button>
+    <div className="space-y-0.5">
+      {groups.map((group, gi) =>
+        group.length === 1 ? (
+          <SeccionCard
+            key={group[0].id}
+            sec={group[0]}
+            isSelected={selected?.id === group[0].id}
+            onClick={() => onSelect(group[0] === selected ? null : group[0])}
+          />
+        ) : (
+          <GroupBlock
+            key={gi}
+            group={group}
+            selected={selected}
+            onSelect={onSelect}
+          />
+        )
+      )}
+    </div>
   )
 }
 
-/** Tarjeta compacta de sección en la grilla */
+// ── GroupBlock ────────────────────────────────────────────────────────────────
+//
+// Secciones paralelas del MISMO curso.
+// El contenedor comparte el borde izquierdo continuo (visualmente conectado).
+// Primera sección: código-sección, título, profesor + tag "N paralelas".
+// Secciones siguientes: solo código-sección y profesor (el título se omite).
+
+function GroupBlock({
+  group, selected, onSelect,
+}: {
+  group:    SeccionAsignada[]
+  selected: SeccionAsignada | null
+  onSelect: (sec: SeccionAsignada | null) => void
+}) {
+  const tipo = group[0].tipo
+
+  return (
+    <div className={`rounded overflow-hidden ${TIPO_CARD[tipo]}`}>
+      {group.map((sec, idx) => (
+        <button
+          key={sec.id}
+          onClick={() => onSelect(sec === selected ? null : sec)}
+          className={`w-full text-left p-1.5 text-xs transition-all
+            ${idx > 0 ? `border-t ${TIPO_DIVIDER[tipo]}` : ''}
+            ${selected?.id === sec.id
+              ? 'ring-1 ring-inset ring-gray-400 shadow-sm'
+              : 'hover:brightness-95'
+            }
+          `}
+        >
+          {/* Primera sección: info completa + indicador de paralelismo */}
+          {idx === 0 ? (
+            <>
+              <span className="font-semibold block truncate leading-tight">
+                {sec.codigo}-{sec.seccion}
+              </span>
+              <span className="block truncate text-[10px] opacity-75 mt-0.5 leading-tight">
+                {sec.titulo}
+              </span>
+              <span className="block truncate text-[10px] opacity-55 leading-tight">
+                {sec.profesor}
+              </span>
+              <span className="block text-[10px] text-gray-400 mt-1 leading-tight">
+                ┄&nbsp;{group.length} secciones paralelas
+              </span>
+            </>
+          ) : (
+            /* Secciones siguientes: solo sección + profesor (título ya mostrado) */
+            <>
+              <span className="font-semibold block truncate leading-tight">
+                {sec.codigo}-{sec.seccion}
+              </span>
+              <span className="block truncate text-[10px] opacity-55 leading-tight">
+                {sec.profesor}
+              </span>
+            </>
+          )}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── SeccionCard ───────────────────────────────────────────────────────────────
+// Sección individual (sin paralelas en la misma celda).
+
 function SeccionCard({
   sec, onClick, isSelected,
 }: {
-  sec: SeccionAsignada
-  onClick: () => void
+  sec:        SeccionAsignada
+  onClick:    () => void
   isSelected: boolean
 }) {
   return (
@@ -413,11 +444,12 @@ function SeccionCard({
   )
 }
 
-/** Panel expandido de detalle */
+// ── SeccionDetail ─────────────────────────────────────────────────────────────
+
 function SeccionDetail({
   sec, onClose,
 }: {
-  sec: SeccionAsignada
+  sec:     SeccionAsignada
   onClose: () => void
 }) {
   return (
@@ -435,10 +467,7 @@ function SeccionDetail({
           </div>
           <p className="text-gray-600 text-sm">{sec.titulo}</p>
         </div>
-        <button
-          onClick={onClose}
-          className="text-gray-400 hover:text-gray-600 p-0.5 transition-colors"
-        >
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-0.5 transition-colors">
           <X size={16} />
         </button>
       </div>
@@ -457,16 +486,37 @@ function SeccionDetail({
         <p className="text-xs font-medium text-gray-400 mb-2">Bloques asignados</p>
         <div className="flex flex-wrap gap-2">
           {sec.bloques.map((b, i) => (
-            <span
-              key={i}
-              className="text-xs bg-gray-100 text-gray-700 px-3 py-1 rounded"
-            >
+            <span key={i} className="text-xs bg-gray-100 text-gray-700 px-3 py-1 rounded">
               {DIAS_LABEL[b.dia as Dia]} · {b.hora_inicio}–{b.hora_fin} ({b.tipo_bloque})
             </span>
           ))}
         </div>
       </div>
     </div>
+  )
+}
+
+// ── Sub-componentes generales ─────────────────────────────────────────────────
+
+function TabBtn({
+  children, active, onClick, secondary = false,
+}: {
+  children:   React.ReactNode
+  active:     boolean
+  onClick:    () => void
+  secondary?: boolean
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-1.5 text-xs font-medium rounded transition-colors
+        ${active
+          ? secondary ? 'bg-gray-700 text-white' : 'bg-[#B71C1C] text-white'
+          : 'border border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+        }`}
+    >
+      {children}
+    </button>
   )
 }
 
