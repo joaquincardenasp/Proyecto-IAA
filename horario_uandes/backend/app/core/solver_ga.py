@@ -177,11 +177,12 @@ def construir_contexto(
 
     # RD3: mismo profesor (afecta_disponibilidad), cursos distintos → no solapar
     # Considerar TODAS las secciones del grupo (RC las sincroniza al mismo bloque que el rep)
+    # RD3: mismo profesor (afecta_disponibilidad), cursos distintos → no solapar
     por_prof_set: dict[str, set[int]] = defaultdict(set)
     for i, sec_ids in enumerate(rep_seccion_ids):
         for sec_id in sec_ids:
             s = sec_by_id[sec_id]
-            if s.afecta_disponibilidad:
+            if s.afecta_disponibilidad and s.rut_profesor:  # ← el fix va aquí
                 por_prof_set[s.rut_profesor].add(i)
     for prof_idxs in por_prof_set.values():
         idxs = sorted(prof_idxs)

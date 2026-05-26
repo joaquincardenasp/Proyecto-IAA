@@ -299,7 +299,62 @@ def cargar_datos(inputs_dir: str | Path) -> DatosProblema:
     xl = pd.ExcelFile(inputs_dir / ARCHIVO_PROFESORES)
     profesores = leer_profesores(xl)
     secciones  = leer_asignaciones(xl, cursos)
-    leer_disponibilidad(xl)  # cargado pero no usado en v1
+
+    # Títulos ya cubiertos por secciones con asignación (prioridad)
+    titulos_con_seccion = set()
+    for s in secciones:
+        curso = cursos.get(s.codigo_curso)
+        if curso:
+            titulos_con_seccion.add(curso.titulo.strip().lower())
+
+    codigos_con_seccion = {s.codigo_curso for s in secciones}
+    len_original = len(secciones)
+
+    for codigo, curso in cursos.items():
+        if codigo in codigos_con_seccion:
+            continue
+        if not curso.semestres_por_carrera:
+            continue
+        titulo_norm = curso.titulo.strip().lower()
+        if titulo_norm in titulos_con_seccion:
+            continue
+
+        titulos_con_seccion.add(titulo_norm)
+
+        if curso.clases_horas > 0:
+            secciones.append(Seccion(
+                id=f"{codigo}-1-CLAS",
+                codigo_curso=codigo,
+                seccion="1",
+                componente=TipoReunion.CLAS,
+                rut_profesor="",
+                afecta_disponibilidad=False,
+                cantidad_bloques_necesarios=_calcular_bloques_necesarios(curso.clases_horas),
+            ))
+        if curso.ayudantias_horas > 0:
+            secciones.append(Seccion(
+                id=f"{codigo}-1-AYUD",
+                codigo_curso=codigo,
+                seccion="1",
+                componente=TipoReunion.AYUD,
+                rut_profesor="",
+                afecta_disponibilidad=False,
+                cantidad_bloques_necesarios=_calcular_bloques_necesarios(curso.ayudantias_horas),
+            ))
+        if curso.laboratorios_horas > 0:
+            secciones.append(Seccion(
+                id=f"{codigo}-1-LABT",
+                codigo_curso=codigo,
+                seccion="1",
+                componente=TipoReunion.LABT,
+                rut_profesor="",
+                afecta_disponibilidad=False,
+                cantidad_bloques_necesarios=_calcular_bloques_necesarios(curso.laboratorios_horas),
+            ))
+
+    print(f"Secciones sin asignación creadas: {len(secciones) - len_original}")
+
+    leer_disponibilidad(xl)
 
     datos = DatosProblema(cursos=cursos, secciones=secciones, profesores=profesores)
     _imprimir_resumen(datos)

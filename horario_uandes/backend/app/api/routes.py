@@ -78,6 +78,23 @@ def _solve_sync(req: SolveRequest) -> None:
         datos    = cargar_datos(INPUTS_DIR)
         historico = leer_historico(INPUTS_DIR)
         _state["datos"] = datos
+        
+        # DEBUG
+        from collections import defaultdict
+        grupos_sem = defaultdict(list)
+        for s in datos.secciones:
+            curso = datos.cursos.get(s.codigo_curso)
+            if not curso:
+                continue
+            for carrera, sems in curso.semestres_por_carrera.items():
+                for sem in sems:
+                    grupos_sem[(carrera, sem)].append(s.id)
+
+        print("Semestre más cargado:")
+        mas_cargado = max(grupos_sem.items(), key=lambda x: len(x[1]))
+        print(f"  {mas_cargado[0]}: {len(mas_cargado[1])} secciones")
+        print(f"  Total secciones: {len(datos.secciones)}")
+        # FIN DEBUG
 
         _set_progress("Ejecutando CP-SAT…")
         resultado_cpsat = resolver(
