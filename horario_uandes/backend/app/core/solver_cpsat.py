@@ -143,7 +143,7 @@ def _agregar_rd3(
     por_prof: dict[str, list] = defaultdict(list)
     for s in secciones:
         if s.afecta_disponibilidad and s.id in x:
-            por_prof[s.rut_profesor].append(s)
+            por_prof[s.rut_profesor].append(s)  # ← todas las sin profesor quedan agrupadas juntas
 
     n = 0
     for secs in por_prof.values():
@@ -273,6 +273,8 @@ def resolver(
     for carrera in carreras:
         grupos: dict[str, list] = defaultdict(list)
         for s in secciones:
+            if not s.rut_profesor:          # ← excluir secciones sin profesor de RD1
+                continue
             curso = datos.cursos.get(s.codigo_curso)
             if not curso:
                 continue
