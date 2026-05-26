@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { AlertCircle, Check, Download, Loader2 } from 'lucide-react'
-import { getStatus, getResults } from './api/client'
+import { getStatus, getResults, EXPORT_URL } from './api/client'
 import type { SolveResult, StatusResponse } from './types'
 import SolverPanel from './components/SolverPanel'
 import HorarioGrid from './components/HorarioGrid'
@@ -99,7 +99,7 @@ export default function App() {
             )}
             {results && (
               <a
-                href="/api/export"
+                href={EXPORT_URL}
                 download="horario_generado.xlsx"
                 className="flex items-center gap-1.5 text-xs font-medium bg-white
                            text-[#B71C1C] hover:bg-red-50 px-3 py-1.5 rounded
