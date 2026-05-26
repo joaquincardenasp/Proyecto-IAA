@@ -6,7 +6,7 @@ class SolveRequest(BaseModel):
     carreras: list[str] = ["Plan Común", "ICI", "IOC", "ICE", "ICC", "ICA", "ICQ"]
     n_generaciones: int = Field(200, ge=1, le=1000)
     pop_size: int = Field(40, ge=4, le=200)
-    tiempo_limite_cpsat: float = Field(120.0, ge=5.0, le=600.0)
+    tiempo_limite_cpsat: float = Field(60.0, ge=5.0, le=300.0)
     seed: int = 42
 
 
