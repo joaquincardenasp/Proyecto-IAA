@@ -1,25 +1,45 @@
 """
-Parser — lee los 5 archivos Excel de input y construye DatosProblema.
+Parser — lee Maestro_XXXXXX.xlsx y SALAS_ESPECIALES_ING.xlsx y construye DatosProblema.
 
-Orden de lectura:
-1. Catálogos (3 archivos) → unión de cursos con semestres por carrera
-2. Salas especiales → mapeadas a cursos
-3. Profesores (hoja "profesores")
-4. Asignaciones (hoja "asignaciones") → crea Secciones
-5. Disponibilidad (hoja "disponibilidad") — OPCIONAL v1
+Fuentes:
+  Maestro_XXXXXX.xlsx
+    Hoja MAESTRO   → secciones a programar (filas con CURSO MANDANTE = "SI")
+    Hoja PROFESORES → RUTs de profesores de jornada completa
 
-Diseño clave:
-- Los 3 planes de estudio comparten las mismas secciones y bloques.
-  Lo que cambia entre planes es en qué semestre cae un curso para RD1.
-- semestres_por_carrera acumula la UNIÓN de semestres de todos los planes.
-  Si PE2022 dice ICC-7 y PE2025 dice ICC-6, el curso queda con ICC-{"7","6"}.
-- Los semestres se guardan como STRINGS preservando sufijos de mención:
-  "9a", "9f", "10i" son semestres distintos (menciones distintas en ICI/IOC).
-  Esto evita topes falsos entre alumnos de distintas menciones.
+  SALAS_ESPECIALES_ING.xlsx
+    Hoja BBDD           → mapeo curso → sala especial
+    Hoja SALAS ESPECIALES → inventario físico (tipo → cantidad de salas)
+
+Columnas del MAESTRO buscadas por nombre (no por posición):
+  CURSO MANDANTE      → filtro principal
+  PLAN DE ESTUDIO     → plan al que pertenece la fila
+  CODIGO              → código del curso
+  TITULO              → nombre del curso
+  SECCIONES           → número/letra de sección
+  Plan Común          → semestre en plan común (prioridad sobre carreras)
+  ICI / IOC / ICE / ICC / ICA → semestre por carrera (si Plan Común vacío)
+  Clases A PROGRAMAR  → horas semanales de cátedra a programar
+  Ayudantías PROGRAMAR / Ayudantías A PROGRAMAR → horas de ayudantía
+  Laboratorios o Talleres PROGRAMAR              → horas de lab
+  RUT PROFESOR 1 / NOMBRE PROFESOR 1             → profesor de cátedra
+  RUT PROFESOR 2 / NOMBRE PROFESOR 2             → segundo profesor (~6 casos)
+  RUT PROFESOR LABT / PROFESOR LABT              → profesor de laboratorio
+  2+1 o 3?            → distribución de bloques de CLAS
+  LUNES / MARTES / MIERCOLES / JUEVES / VIERNES  → disponibilidad (versión MAYÚSCULAS)
+    Las columnas en minúsculas/título (horario ya asignado) se ignoran.
+
+Diseño:
+  - Un mismo CODIGO puede aparecer en múltiples filas (distintos PLAN DE ESTUDIO).
+    → Los semestres de cada plan se ACUMULAN (unión de sets).
+    → Las secciones se crean solo una vez por (CODIGO, SECCIONES, componente).
+  - afecta_disponibilidad: True solo si hay RUT de profesor; False para AYUD siempre.
+  - "2+1" se trata como 2h en v1 (simplificación documentada).
 """
 from __future__ import annotations
 
 import math
+import re
+import unicodedata
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -31,30 +51,174 @@ from .models import Curso, DatosProblema, Profesor, Seccion, TipoProfesor, TipoR
 warnings.filterwarnings("ignore")
 
 # ---------------------------------------------------------------------------
-# Nombres de los planes y sus archivos (relativo a inputs/)
+# Constantes de archivos
 # ---------------------------------------------------------------------------
-CATALOGOS = [
-    ("PE2022",      "Copia de Catálogo PE 2022.xlsx"),
-    ("PE2022_2025", "Copia de Catálogo PE 2022 y PE 2025.xlsx"),
-    ("PE2026",      "Copia de Catálogo PE 2026.xlsx"),
-]
 
-ARCHIVO_PROFESORES = "profesores_completo.xlsx"
-ARCHIVO_SALAS      = "SALAS_ESPECIALES_ING.xlsx"
-
-CARRERAS_ESPECIALIDAD = ["ICI", "IOC", "ICE", "ICC", "ICA", "ICQ"]
+ARCHIVO_SALAS = "SALAS_ESPECIALES_ING.xlsx"
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Normalización y búsqueda de columnas por nombre
 # ---------------------------------------------------------------------------
+
+def _norm(s: str) -> str:
+    """
+    Normaliza un nombre de columna para comparación insensible a:
+    acentos, mayúsculas/minúsculas y espacios extra.
+
+    Ejemplos:
+      "Plan Común" → "plan comun"
+      "AYUDANTÍAS PROGRAMAR" → "ayudantias programar"
+      "  CODIGO  " → "codigo"
+    """
+    s = str(s).strip().lower()
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+
+
+def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
+    """
+    Construye {campo_logico: nombre_real_columna_en_df} buscando por nombre normalizado.
+
+    Estrategia de búsqueda por campo:
+      1. Coincidencia exacta (normalizada) con alguno de los patrones del campo.
+      2. Coincidencia parcial (patrón contenido en el nombre normalizado).
+      El primer patrón en la lista tiene mayor prioridad.
+
+    Para columnas de días de disponibilidad se prefiere la versión en MAYÚSCULAS
+    (disponibilidad a programar) sobre Título Case o minúsculas (horario ya asignado).
+
+    Si un campo requerido no se encuentra, el valor es None; el llamador decide si
+    lanzar un error o continuar con fallback.
+    """
+    col_norm: dict[str, str] = {col: _norm(str(col)) for col in df.columns}
+
+    def buscar(*patrones: str) -> Optional[str]:
+        pats = [_norm(p) for p in patrones]
+        # Fase 1: coincidencia exacta
+        for pat in pats:
+            for col, cn in col_norm.items():
+                if cn == pat:
+                    return col
+        # Fase 2: coincidencia parcial (el patrón está contenido)
+        for pat in pats:
+            for col, cn in col_norm.items():
+                if pat in cn:
+                    return col
+        return None
+
+    def buscar_mayuscula(*patrones: str) -> Optional[str]:
+        """
+        Como buscar(), pero prioriza columnas cuyos nombre original sea todo MAYÚSCULAS.
+        Esto distingue "LUNES" (disponibilidad a programar) de "Lunes" (ya asignado).
+        """
+        pats = [_norm(p) for p in patrones]
+        # Fase 1: exacta + todo-mayúsculas
+        for pat in pats:
+            for col, cn in col_norm.items():
+                if cn == pat and str(col).strip().isupper():
+                    return col
+        # Fase 2: exacta (cualquier capitalización)
+        for pat in pats:
+            for col, cn in col_norm.items():
+                if cn == pat:
+                    return col
+        # Fase 3: parcial + todo-mayúsculas
+        for pat in pats:
+            for col, cn in col_norm.items():
+                if pat in cn and str(col).strip().isupper():
+                    return col
+        # Fase 4: parcial (cualquier capitalización)
+        for pat in pats:
+            for col, cn in col_norm.items():
+                if pat in cn:
+                    return col
+        return None
+
+    return {
+        # Filtro y metadata
+        "MANDANTE":     buscar("curso mandante"),
+        "PLAN":         buscar("plan de estudio"),
+        "CODIGO":       buscar("codigo"),
+        "TITULO":       buscar("titulo"),
+        "SECCIONES":    buscar("secciones"),
+        # Malla curricular
+        "PC":           buscar("plan comun"),
+        "ICI":          buscar("ici"),
+        "IOC":          buscar("ioc"),
+        "ICE":          buscar("ice"),
+        "ICC":          buscar("icc"),
+        "ICA":          buscar("ica"),
+        # Horas a programar (usar estas, NO las regulares)
+        "CLAS_PROG":    buscar("clases a programar"),
+        "AYUD_PROG":    buscar("ayudantias a programar", "ayudantias programar",
+                               "ayudantia programar"),
+        "LAB_PROG":     buscar("laboratorios o talleres programar",
+                               "labs o talleres programar",
+                               "laboratorios programar", "talleres programar"),
+        # Profesores
+        "RUT_PROF1":    buscar("rut profesor 1"),
+        "NOMBRE_PROF1": buscar("nombre profesor 1"),
+        "RUT_PROF2":    buscar("rut profesor 2"),
+        "NOMBRE_PROF2": buscar("nombre profesor 2"),
+        "RUT_LABT":     buscar("rut profesor labt"),
+        "NOMBRE_LABT":  buscar("nombre profesor labt", "profesor labt"),
+        # Distribución de bloques
+        "DISTRIBUCION": buscar("2+1 o 3?", "2+1 o 3"),
+        # Disponibilidad (versión MAYÚSCULAS = a programar; minúsculas = ya asignado → ignorar)
+        "LUNES_DISP":   buscar_mayuscula("lunes"),
+        "MARTES_DISP":  buscar_mayuscula("martes"),
+        "MIERC_DISP":   buscar_mayuscula("miercoles"),
+        "JUEVES_DISP":  buscar_mayuscula("jueves"),
+        "VIERNES_DISP": buscar_mayuscula("viernes"),
+    }
+
+
+def _validar_columnas(cols: dict[str, Optional[str]]) -> None:
+    """Imprime el estado de cada campo y lanza ValueError si falta alguno requerido."""
+    requeridos = {"MANDANTE", "CODIGO", "SECCIONES"}
+    faltantes = []
+
+    print("  Columnas encontradas en el MAESTRO:")
+    for campo, col_real in cols.items():
+        if col_real:
+            print(f"    {campo:15} → '{col_real}'")
+        else:
+            marker = " ← REQUERIDA, NO ENCONTRADA" if campo in requeridos else " (opcional, sin datos)"
+            print(f"    {campo:15} → None{marker}")
+            if campo in requeridos:
+                faltantes.append(campo)
+
+    if faltantes:
+        raise ValueError(
+            f"Columnas requeridas no encontradas en la hoja MAESTRO: {faltantes}\n"
+            "Verifica los nombres de columna en el archivo Excel."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers de acceso a filas
+# ---------------------------------------------------------------------------
+
+def _get(row: pd.Series, col_name: Optional[str]):
+    """Accede a la fila por nombre de columna. Retorna None si col_name es None."""
+    if col_name is None:
+        return None
+    return row.get(col_name)
+
+
+def _str(val) -> str:
+    """Valor a string limpio; NaN/None → ''."""
+    if val is None:
+        return ""
+    s = str(val).strip()
+    return "" if s.lower() in ("nan", "none", "\xa0") else s
+
 
 def _parse_semestre(val) -> Optional[str]:
     """
-    Convierte un valor de semestre a string canónico, preservando sufijos de mención.
-
-    - int/float numérico positivo → str(int(val))  ej. 1.0 → "1"
-    - string que empieza con dígito → se mantiene tal cual  ej. "9a" → "9a"
-    - 0, NaN, None, '*', '\xa0', etc. → None (sin semestre)
+    Convierte un valor de semestre a string canónico preservando sufijos de mención.
+    - float/int positivo → str(int)   ej. 5.0 → "5"
+    - string que empieza por dígito → tal cual   ej. "9a" → "9a"
+    - 0, NaN, None, '*' → None
     """
     if val is None:
         return None
@@ -65,220 +229,356 @@ def _parse_semestre(val) -> Optional[str]:
         return str(v) if v > 0 else None
     if isinstance(val, int):
         return str(val) if val > 0 else None
-    # string
     s = str(val).strip()
-    if not s or s == "\xa0":
+    if not s or s in ("\xa0", "nan", "*"):
         return None
-    if s[0].isdigit():
-        return s  # preservar "9a", "10f", "5hi", "9", etc.
-    return None   # '*' u otros caracteres no numéricos
+    return s if s[0].isdigit() else None
 
 
 def _parse_horas(val) -> int:
-    """Convierte un valor de horas (puede ser NaN, str vacío o float) a int."""
+    """Valor de horas (puede ser NaN, str, float) → int ≥ 0."""
     if val is None:
         return 0
     if isinstance(val, str):
-        val = val.strip()
-        if not val or val == "\xa0":
+        s = val.strip()
+        if not s or s in ("\xa0", "nan"):
             return 0
-        # Puede haber "2+1" → tomamos solo el primer número para v1
-        import re
-        m = re.match(r"(\d+)", val)
+        m = re.match(r"(\d+)", s)
         return int(m.group(1)) if m else 0
     if isinstance(val, float):
         return 0 if math.isnan(val) else int(val)
-    return int(val)
+    if isinstance(val, int):
+        return val
+    return 0
 
 
-def _calcular_bloques_necesarios(horas: int) -> int:
+def _normalizar_rut(val) -> str:
+    """RUT limpio: sin puntos ni espacios. Retorna '' si está vacío o es NaN."""
+    s = _str(val)
+    return "" if not s else s.replace(".", "").replace(" ", "")
+
+
+def _normalizar_seccion_id(val) -> str:
     """
-    Número de bloques horarios que necesita una sección según sus horas semanales.
-
-    - 3h → 1 bloque de 3h
-    - otros → ceil(horas / 2) bloques de 2h; mínimo 1
+    Normaliza el número de sección:
+      float/int → str(int)   (1.0 → "1")
+      string    → stripped   ("A" → "A")
     """
+    if val is None:
+        return "1"
+    if isinstance(val, float) and not math.isnan(val):
+        return str(int(val))
+    if isinstance(val, int):
+        return str(val)
+    s = _str(val)
+    if not s:
+        return "1"
+    try:
+        return str(int(float(s)))
+    except (ValueError, TypeError):
+        return s
+
+
+def _calcular_bloques_clas(horas: int, distribucion: str) -> int:
+    """
+    Bloques necesarios para CLAS según horas y distribución:
+      "3" o "3-juntas" → 1 bloque de 3h (independiente de las horas)
+      horas == 3 sin distribución explícita → 1 bloque de 3h
+      "2+1" → tratar como 2h en v1
+      Resto → ceil(horas/2), mínimo 1
+    """
+    d = _norm(distribucion or "")
+    if d in ("3", "3-juntas"):
+        return 1
     if horas <= 0:
         return 1
     if horas == 3:
-        return 1  # 1 bloque de 3h
+        return 1
+    return max(1, math.ceil(horas / 2))
+
+
+def _calcular_bloques(horas: int) -> int:
+    """Bloques para AYUD y LABT: ceil(horas/2), mínimo 1."""
+    if horas <= 0:
+        return 1
+    if horas == 3:
+        return 1
     return max(1, math.ceil(horas / 2))
 
 
 # ---------------------------------------------------------------------------
-# 1. Lectura de catálogos
+# Lectura de salas especiales
 # ---------------------------------------------------------------------------
 
-def _leer_un_catalogo(path: Path, plan: str, cursos: dict[str, Curso]) -> None:
+def _leer_salas_especiales(
+    inputs_dir: Path,
+) -> tuple[dict[str, str], dict[str, int]]:
     """
-    Lee un archivo de catálogo y actualiza el dict de cursos.
+    Lee SALAS_ESPECIALES_ING.xlsx.
 
-    Para cada curso:
-    - Agrega `plan` al set curso.planes
-    - Hace UNIÓN de semestres en curso.semestres_por_carrera
+    Retorna:
+      sala_por_curso:     {codigo_curso: nombre_sala}
+                          Solo para LABORATORIO y CLASE (no PRUEBA ni AYUDANTIA).
+                          Si el mismo curso tiene sala para LABT y para CLAS,
+                          la de LABT tiene prioridad (más restrictiva).
+      capacidad_por_tipo: {tipo_sala: n_salas_fisicas}
     """
-    df = pd.read_excel(path, header=1)
-    if "Unnamed: 0" in df.columns:
-        df = df.drop(columns=["Unnamed: 0"])
+    path = inputs_dir / ARCHIVO_SALAS
+    if not path.exists():
+        print(f"[AVISO] {ARCHIVO_SALAS} no encontrado — sin salas especiales")
+        return {}, {}
+
+    sala_por_curso: dict[str, str] = {}
+
+    try:
+        df_bbdd = pd.read_excel(path, sheet_name="BBDD")
+        # Buscar columnas por nombre normalizado
+        col_codigo = next(
+            (c for c in df_bbdd.columns if _norm(c) == "codigo"), None
+        )
+        col_sala = next(
+            (c for c in df_bbdd.columns if "sala" in _norm(c) and "especial" in _norm(c)), None
+        )
+        if col_codigo is None or col_sala is None:
+            print(f"[AVISO] Hoja BBDD: no se encontraron columnas CODIGO o SALA ESPECIAL")
+        else:
+            for _, row in df_bbdd.iterrows():
+                codigo   = _str(row.get(col_codigo))
+                sala_raw = _str(row.get(col_sala))
+                if not codigo or not sala_raw:
+                    continue
+
+                marker = " EN HORARIO DE "
+                idx = sala_raw.upper().find(marker)
+                if idx != -1:
+                    nombre   = sala_raw[:idx].strip()
+                    contexto = sala_raw[idx + len(marker):].strip().upper()
+                else:
+                    nombre   = sala_raw.strip()
+                    contexto = ""
+
+                if not nombre or contexto in ("PRUEBA", "AYUDANTIA"):
+                    continue
+
+                # LABT tiene prioridad sobre CLASE
+                if codigo not in sala_por_curso or contexto == "LABORATORIO":
+                    sala_por_curso[codigo] = nombre
+
+    except Exception as e:
+        print(f"[AVISO] Error leyendo hoja BBDD de {ARCHIVO_SALAS}: {e}")
+
+    capacidad_por_tipo: dict[str, int] = {}
+    try:
+        df_salas = pd.read_excel(path, sheet_name="SALAS ESPECIALES")
+        tipo_col = next(
+            (c for c in df_salas.columns if "tipo" in _norm(c)), None
+        )
+        if tipo_col:
+            for val in df_salas[tipo_col]:
+                tipo = _str(val)
+                if tipo:
+                    capacidad_por_tipo[tipo] = capacidad_por_tipo.get(tipo, 0) + 1
+    except Exception as e:
+        print(f"[AVISO] Error leyendo hoja SALAS ESPECIALES de {ARCHIVO_SALAS}: {e}")
+
+    return sala_por_curso, capacidad_por_tipo
+
+
+# ---------------------------------------------------------------------------
+# Lectura de profesores de jornada (hoja PROFESORES del maestro)
+# ---------------------------------------------------------------------------
+
+def _leer_ruts_jornada(xl: pd.ExcelFile) -> set[str]:
+    """
+    Lee la hoja PROFESORES y retorna el set de RUTs de jornada completa.
+    Busca la columna de RUT por nombre normalizado; si no la encuentra, usa la 2a columna.
+    """
+    try:
+        df = xl.parse("PROFESORES", header=0)
+        # Intentar encontrar columna de RUT por nombre
+        col_rut = next(
+            (c for c in df.columns if "rut" in _norm(c)), None
+        )
+        ruts: set[str] = set()
+        for _, row in df.iterrows():
+            val = row.get(col_rut) if col_rut else (row.iloc[1] if len(row) > 1 else None)
+            rut = _normalizar_rut(val)
+            if rut:
+                ruts.add(rut)
+        return ruts
+    except Exception as e:
+        print(f"[AVISO] No se pudo leer hoja PROFESORES del maestro: {e}")
+        return set()
+
+
+# ---------------------------------------------------------------------------
+# Procesamiento de la hoja MAESTRO
+# ---------------------------------------------------------------------------
+
+def _leer_maestro(
+    df: pd.DataFrame,
+    cols: dict[str, Optional[str]],
+    cursos: dict[str, Curso],
+    secciones: list[Seccion],
+    profesores: dict[str, Profesor],
+    ruts_jornada: set[str],
+) -> None:
+    """
+    Itera sobre las filas del MAESTRO donde CURSO MANDANTE == "SI".
+    Actualiza cursos, secciones y profesores in-place.
+
+    Para el mismo (CODIGO, SECCIONES, componente) solo se crea una sección;
+    si el mismo ID aparece en otra fila (otro plan de estudio), solo se acumulan
+    los semestres en el Curso correspondiente.
+    """
+    sec_ids_creados: set[str] = set()
+    advertencias: list[str] = []
+
+    # Mapeo carrera → clave en cols
+    carreras_cols = {
+        "Plan Común": "PC",
+        "ICI": "ICI",
+        "IOC": "IOC",
+        "ICE": "ICE",
+        "ICC": "ICC",
+        "ICA": "ICA",
+    }
 
     for _, row in df.iterrows():
-        codigo = str(row.get("CODIGO", "")).strip()
-        if not codigo or codigo == "nan":
+        mandante = _str(_get(row, cols["MANDANTE"])).upper()
+        if mandante != "SI":
             continue
 
-        titulo    = str(row.get("TITULO", "")).strip()
-        clases_h  = _parse_horas(row.get("Clases"))
-        ayud_h    = _parse_horas(row.get("Ayudantías"))
-        lab_h     = _parse_horas(row.get("Laboratorios o Talleres"))
+        # ── Identificación ────────────────────────────────────────────────
+        codigo = _str(_get(row, cols["CODIGO"]))
+        if not codigo:
+            continue
 
-        # Semestre: Plan Común tiene prioridad (ver CONTEXT.md §5 y PRD §4)
-        pc = _parse_semestre(row.get("Plan Común"))
+        titulo       = _str(_get(row, cols["TITULO"]))
+        seccion_id   = _normalizar_seccion_id(_get(row, cols["SECCIONES"]))
+        plan_estudio = _str(_get(row, cols["PLAN"])) or "desconocido"
 
+        # ── Semestres (regla Plan Común vs especialidad) ───────────────────
+        pc = _parse_semestre(_get(row, cols["PC"]))
         if pc is not None:
-            # Curso de plan común: usar SOLO la columna "Plan Común"
-            semestres_nuevos: dict[str, str] = {"Plan Común": pc}
+            # Curso de plan común: usar SOLO Plan Común (ver CONTEXT.md §5)
+            semestres_fila: dict[str, str] = {"Plan Común": pc}
         else:
-            # Curso de especialidad: leer columnas de carrera
-            semestres_nuevos = {}
-            for carrera in CARRERAS_ESPECIALIDAD:
-                sem = _parse_semestre(row.get(carrera))
+            semestres_fila = {}
+            for carrera, clave in carreras_cols.items():
+                if carrera == "Plan Común":
+                    continue
+                sem = _parse_semestre(_get(row, cols[clave]))
                 if sem is not None:
-                    semestres_nuevos[carrera] = sem
+                    semestres_fila[carrera] = sem
 
-        # Crear curso si no existe
+        # ── Horas a programar ─────────────────────────────────────────────
+        clas_h       = _parse_horas(_get(row, cols["CLAS_PROG"]))
+        ayud_h       = _parse_horas(_get(row, cols["AYUD_PROG"]))
+        lab_h        = _parse_horas(_get(row, cols["LAB_PROG"]))
+        distribucion = _str(_get(row, cols["DISTRIBUCION"]))
+
+        if clas_h == 0 and ayud_h == 0 and lab_h == 0:
+            advertencias.append(
+                f"[WARN] {codigo}-{seccion_id} ({plan_estudio}): "
+                "horas A PROGRAMAR = 0 en todos los componentes"
+            )
+
+        # ── Profesores ────────────────────────────────────────────────────
+        rut1        = _normalizar_rut(_get(row, cols["RUT_PROF1"]))
+        nombre1     = _str(_get(row, cols["NOMBRE_PROF1"]))
+        rut2        = _normalizar_rut(_get(row, cols["RUT_PROF2"]))
+        nombre2     = _str(_get(row, cols["NOMBRE_PROF2"]))
+        rut_labt    = _normalizar_rut(_get(row, cols["RUT_LABT"]))
+        nombre_labt = _str(_get(row, cols["NOMBRE_LABT"]))
+
+        if clas_h > 0 and not rut1:
+            advertencias.append(f"[WARN] {codigo}-{seccion_id}: CLAS sin profesor asignado")
+        if lab_h > 0 and not rut_labt and not rut1:
+            advertencias.append(f"[WARN] {codigo}-{seccion_id}: LABT sin profesor asignado")
+        if rut2:
+            advertencias.append(
+                f"[INFO] {codigo}-{seccion_id}: PROFESOR 2 presente ({nombre2}) — "
+                "solo se usa PROF 1 para restricciones en v1"
+            )
+
+        # Registrar todos los profesores de esta fila
+        for rut, nombre in [(rut1, nombre1), (rut2, nombre2), (rut_labt, nombre_labt)]:
+            if rut and rut not in profesores:
+                tipo = (
+                    TipoProfesor.JORNADA if rut in ruts_jornada
+                    else TipoProfesor.HONORARIO
+                )
+                profesores[rut] = Profesor(rut=rut, nombre=nombre, tipo=tipo)
+
+        # ── Crear / actualizar Curso ──────────────────────────────────────
         if codigo not in cursos:
             cursos[codigo] = Curso(
                 codigo=codigo,
                 titulo=titulo,
-                clases_horas=clases_h,
+                clases_horas=clas_h,
                 ayudantias_horas=ayud_h,
                 laboratorios_horas=lab_h,
             )
         else:
-            # Actualizar horas solo si el campo está vacío
+            # Si ya existe, conservar la hora más alta observada
             c = cursos[codigo]
-            if c.clases_horas == 0 and clases_h > 0:
-                c.clases_horas = clases_h
-            if c.ayudantias_horas == 0 and ayud_h > 0:
-                c.ayudantias_horas = ayud_h
-            if c.laboratorios_horas == 0 and lab_h > 0:
-                c.laboratorios_horas = lab_h
+            c.clases_horas       = max(c.clases_horas, clas_h)
+            c.ayudantias_horas   = max(c.ayudantias_horas, ayud_h)
+            c.laboratorios_horas = max(c.laboratorios_horas, lab_h)
 
-        curso = cursos[codigo]
-        curso.planes.add(plan)
+        cursos[codigo].planes.add(plan_estudio)
+        for carrera, sem in semestres_fila.items():
+            cursos[codigo].semestres_por_carrera.setdefault(carrera, set()).add(sem)
 
-        # Unión de semestres por carrera (acumula a través de planes)
-        for carrera, sem in semestres_nuevos.items():
-            curso.semestres_por_carrera.setdefault(carrera, set()).add(sem)
+        # ── Crear secciones (una sola vez por id único) ───────────────────
+        sec_base = f"{codigo}-{seccion_id}"
 
+        if clas_h > 0:
+            sec_id = f"{sec_base}-CLAS"
+            if sec_id not in sec_ids_creados:
+                sec_ids_creados.add(sec_id)
+                secciones.append(Seccion(
+                    id=sec_id,
+                    codigo_curso=codigo,
+                    seccion=seccion_id,
+                    componente=TipoReunion.CLAS,
+                    rut_profesor=rut1,
+                    afecta_disponibilidad=bool(rut1),
+                    cantidad_bloques_necesarios=_calcular_bloques_clas(clas_h, distribucion),
+                ))
 
-def leer_catalogos(inputs_dir: Path) -> dict[str, Curso]:
-    """Lee los 3 catálogos y retorna el dict unificado de cursos."""
-    cursos: dict[str, Curso] = {}
-    for plan, fname in CATALOGOS:
-        _leer_un_catalogo(inputs_dir / fname, plan, cursos)
-    return cursos
+        if ayud_h > 0:
+            sec_id = f"{sec_base}-AYUD"
+            if sec_id not in sec_ids_creados:
+                sec_ids_creados.add(sec_id)
+                secciones.append(Seccion(
+                    id=sec_id,
+                    codigo_curso=codigo,
+                    seccion=seccion_id,
+                    componente=TipoReunion.AYUD,
+                    rut_profesor=rut1,           # nominal; la dicta un TA
+                    afecta_disponibilidad=False,  # AYUD nunca afecta disponibilidad
+                    cantidad_bloques_necesarios=_calcular_bloques(ayud_h),
+                ))
 
+        if lab_h > 0:
+            sec_id = f"{sec_base}-LABT"
+            if sec_id not in sec_ids_creados:
+                sec_ids_creados.add(sec_id)
+                prof_lab = rut_labt if rut_labt else rut1
+                secciones.append(Seccion(
+                    id=sec_id,
+                    codigo_curso=codigo,
+                    seccion=seccion_id,
+                    componente=TipoReunion.LABT,
+                    rut_profesor=prof_lab,
+                    afecta_disponibilidad=bool(prof_lab),
+                    cantidad_bloques_necesarios=_calcular_bloques(lab_h),
+                ))
 
-# ---------------------------------------------------------------------------
-# 2. Salas especiales
-# ---------------------------------------------------------------------------
-
-def leer_salas_especiales(inputs_dir: Path) -> dict[str, str]:
-    """Retorna {codigo_curso: nombre_sala}."""
-    df = pd.read_excel(inputs_dir / ARCHIVO_SALAS)
-    return {
-        str(row["CODIGO"]).strip(): str(row["SALA ESPECIAL"]).strip()
-        for _, row in df.iterrows()
-        if str(row.get("CODIGO", "")).strip() not in ("", "nan")
-    }
-
-
-# ---------------------------------------------------------------------------
-# 3 & 4. Profesores y asignaciones
-# ---------------------------------------------------------------------------
-
-def leer_profesores(xl: pd.ExcelFile) -> dict[str, Profesor]:
-    """Lee hoja 'profesores' y retorna {rut: Profesor}."""
-    df = xl.parse("profesores")
-    profesores: dict[str, Profesor] = {}
-    for _, row in df.iterrows():
-        rut    = str(row["rut_profesor"]).strip()
-        nombre = str(row["nombre_profesor"]).strip()
-        tipo_s = str(row["tipo_profesor"]).strip().upper()
-        try:
-            tipo = TipoProfesor[tipo_s]
-        except KeyError:
-            tipo = TipoProfesor.PENDIENTE
-        profesores[rut] = Profesor(rut=rut, nombre=nombre, tipo=tipo)
-    return profesores
-
-
-def leer_asignaciones(xl: pd.ExcelFile, cursos: dict[str, Curso]) -> list[Seccion]:
-    """Lee hoja 'asignaciones' y retorna lista de Seccion."""
-    df = xl.parse("asignaciones")
-    secciones: list[Seccion] = []
-
-    for _, row in df.iterrows():
-        rut        = str(row["rut_profesor"]).strip()
-        codigo     = str(row["codigo_curso"]).strip()
-        seccion_id = str(row["seccion"]).strip()
-        comp_s     = str(row["componente"]).strip().upper()
-        afecta     = bool(row["afecta_disponibilidad"])
-
-        try:
-            componente = TipoReunion[comp_s]
-        except KeyError:
-            continue
-
-        curso = cursos.get(codigo)
-        if curso is None:
-            horas = 2
-        else:
-            if componente == TipoReunion.CLAS:
-                horas = curso.clases_horas
-            elif componente == TipoReunion.AYUD:
-                horas = curso.ayudantias_horas
-            else:  # LABT
-                horas = curso.laboratorios_horas
-
-        n_bloques = _calcular_bloques_necesarios(horas)
-
-        secciones.append(Seccion(
-            id=f"{codigo}-{seccion_id}-{comp_s}",
-            codigo_curso=codigo,
-            seccion=seccion_id,
-            componente=componente,
-            rut_profesor=rut,
-            afecta_disponibilidad=afecta,
-            cantidad_bloques_necesarios=n_bloques,
-        ))
-
-    return secciones
-
-
-# ---------------------------------------------------------------------------
-# 5. Disponibilidad (opcional v1)
-# ---------------------------------------------------------------------------
-
-def leer_disponibilidad(xl: pd.ExcelFile) -> dict[str, list[dict]]:
-    """
-    Lee hoja 'disponibilidad'. Retorna {rut: [{dia, bloque_inicio, bloque_fin}]}.
-    Opcional en v1 — si hay error, retorna dict vacío.
-    """
-    try:
-        df = xl.parse("disponibilidad")
-        disp: dict[str, list[dict]] = {}
-        for _, row in df.iterrows():
-            rut = str(row["rut_profesor"]).strip()
-            disp.setdefault(rut, []).append({
-                "dia":           str(row["dia"]).strip(),
-                "bloque_inicio": str(row["bloque_inicio"]).strip(),
-                "bloque_fin":    str(row["bloque_fin"]).strip(),
-            })
-        return disp
-    except Exception:
-        return {}
+    for w in advertencias:
+        print(w)
 
 
 # ---------------------------------------------------------------------------
@@ -286,78 +586,60 @@ def leer_disponibilidad(xl: pd.ExcelFile) -> dict[str, list[dict]]:
 # ---------------------------------------------------------------------------
 
 def cargar_datos(inputs_dir: str | Path) -> DatosProblema:
-    """Lee los 5 archivos Excel y construye DatosProblema. Imprime resumen."""
+    """
+    Lee Maestro_XXXXXX.xlsx + SALAS_ESPECIALES_ING.xlsx y construye DatosProblema.
+    Imprime un resumen al final.
+    """
     inputs_dir = Path(inputs_dir)
 
-    cursos = leer_catalogos(inputs_dir)
+    # Encontrar el archivo Maestro (acepta cualquier capitalización)
+    candidatos = sorted(inputs_dir.glob("[Mm]aestro*.xlsx"))
+    if not candidatos:
+        raise FileNotFoundError(
+            f"No se encontró ningún archivo Maestro*.xlsx en {inputs_dir}\n"
+            "Coloca el maestro en inputs/ con nombre que empiece por 'Maestro'."
+        )
+    maestro_path = candidatos[0]
+    if len(candidatos) > 1:
+        print(f"[AVISO] Múltiples archivos maestro. Usando: {maestro_path.name}")
+    print(f"Maestro: {maestro_path.name}")
 
-    salas = leer_salas_especiales(inputs_dir)
-    for codigo, sala in salas.items():
+    # Salas especiales
+    sala_por_curso, capacidad_por_tipo = _leer_salas_especiales(inputs_dir)
+
+    # Abrir el maestro
+    xl = pd.ExcelFile(maestro_path)
+
+    # Profesores de jornada
+    ruts_jornada = _leer_ruts_jornada(xl)
+    print(f"Profesores de jornada en hoja PROFESORES: {len(ruts_jornada)}")
+
+    # Hoja MAESTRO
+    df_maestro = xl.parse("MAESTRO", header=0)
+    print(f"Hoja MAESTRO: {len(df_maestro)} filas totales, {len(df_maestro.columns)} columnas")
+
+    # Mapeo de columnas por nombre
+    cols = _mapear_columnas(df_maestro)
+    _validar_columnas(cols)
+
+    n_mandantes = (
+        df_maestro[cols["MANDANTE"]].astype(str).str.strip().str.upper() == "SI"
+    ).sum()
+    print(f"Filas con CURSO MANDANTE = 'SI': {n_mandantes}")
+
+    cursos: dict[str, Curso]        = {}
+    secciones: list[Seccion]        = []
+    profesores: dict[str, Profesor] = {}
+
+    _leer_maestro(df_maestro, cols, cursos, secciones, profesores, ruts_jornada)
+
+    # Aplicar salas especiales
+    for codigo, sala in sala_por_curso.items():
         if codigo in cursos:
             cursos[codigo].sala_especial = sala
 
-    xl = pd.ExcelFile(inputs_dir / ARCHIVO_PROFESORES)
-    profesores = leer_profesores(xl)
-    secciones  = leer_asignaciones(xl, cursos)
-
-    # Títulos ya cubiertos por secciones con asignación (prioridad)
-    titulos_con_seccion = set()
-    for s in secciones:
-        curso = cursos.get(s.codigo_curso)
-        if curso:
-            titulos_con_seccion.add(curso.titulo.strip().lower())
-
-    codigos_con_seccion = {s.codigo_curso for s in secciones}
-    len_original = len(secciones)
-
-    for codigo, curso in cursos.items():
-        if codigo in codigos_con_seccion:
-            continue
-        if not curso.semestres_por_carrera:
-            continue
-        titulo_norm = curso.titulo.strip().lower()
-        if titulo_norm in titulos_con_seccion:
-            continue
-
-        titulos_con_seccion.add(titulo_norm)
-
-        if curso.clases_horas > 0:
-            secciones.append(Seccion(
-                id=f"{codigo}-1-CLAS",
-                codigo_curso=codigo,
-                seccion="1",
-                componente=TipoReunion.CLAS,
-                rut_profesor="",
-                afecta_disponibilidad=False,
-                cantidad_bloques_necesarios=_calcular_bloques_necesarios(curso.clases_horas),
-            ))
-        if curso.ayudantias_horas > 0:
-            secciones.append(Seccion(
-                id=f"{codigo}-1-AYUD",
-                codigo_curso=codigo,
-                seccion="1",
-                componente=TipoReunion.AYUD,
-                rut_profesor="",
-                afecta_disponibilidad=False,
-                cantidad_bloques_necesarios=_calcular_bloques_necesarios(curso.ayudantias_horas),
-            ))
-        if curso.laboratorios_horas > 0:
-            secciones.append(Seccion(
-                id=f"{codigo}-1-LABT",
-                codigo_curso=codigo,
-                seccion="1",
-                componente=TipoReunion.LABT,
-                rut_profesor="",
-                afecta_disponibilidad=False,
-                cantidad_bloques_necesarios=_calcular_bloques_necesarios(curso.laboratorios_horas),
-            ))
-
-    print(f"Secciones sin asignación creadas: {len(secciones) - len_original}")
-
-    leer_disponibilidad(xl)
-
     datos = DatosProblema(cursos=cursos, secciones=secciones, profesores=profesores)
-    _imprimir_resumen(datos)
+    _imprimir_resumen(datos, capacidad_por_tipo)
     return datos
 
 
@@ -365,26 +647,51 @@ def cargar_datos(inputs_dir: str | Path) -> DatosProblema:
 # Resumen
 # ---------------------------------------------------------------------------
 
-def _imprimir_resumen(datos: DatosProblema) -> None:
-    cursos    = datos.cursos
-    secciones = datos.secciones
+def _imprimir_resumen(
+    datos: DatosProblema,
+    capacidad_por_tipo: dict[str, int] | None = None,
+) -> None:
+    cursos     = datos.cursos
+    secciones  = datos.secciones
     profesores = datos.profesores
 
     print("=" * 60)
     print("RESUMEN DEL PROBLEMA")
     print("=" * 60)
 
-    # Cursos por plan (usando campo planes)
+    print(f"\nCursos únicos: {len(cursos)}")
     conteo_por_plan: dict[str, int] = {}
-    for curso in cursos.values():
-        for plan in curso.planes:
+    for c in cursos.values():
+        for plan in c.planes:
             conteo_por_plan[plan] = conteo_por_plan.get(plan, 0) + 1
-
-    print(f"\nCursos únicos totales: {len(cursos)}")
     for plan, n in sorted(conteo_por_plan.items()):
         print(f"  {plan}: {n} cursos")
 
-    # Cursos con múltiples semestres en alguna carrera (efecto de planes distintos)
+    por_comp: dict[str, int] = {}
+    for s in secciones:
+        por_comp[s.componente.value] = por_comp.get(s.componente.value, 0) + 1
+    print(f"\nSecciones totales: {len(secciones)}")
+    for comp, n in sorted(por_comp.items()):
+        print(f"  {comp}: {n}")
+
+    por_tipo: dict[str, int] = {}
+    for p in profesores.values():
+        por_tipo[p.tipo.value] = por_tipo.get(p.tipo.value, 0) + 1
+    print(f"\nProfesores únicos: {len(profesores)}")
+    for tipo, n in sorted(por_tipo.items()):
+        print(f"  {tipo}: {n}")
+
+    multi = [s for s in secciones if s.cantidad_bloques_necesarios > 1]
+    print(f"\nSecciones con múltiples bloques: {len(multi)}")
+    if multi:
+        resumen_multi: dict[int, int] = {}
+        for s in multi:
+            resumen_multi[s.cantidad_bloques_necesarios] = (
+                resumen_multi.get(s.cantidad_bloques_necesarios, 0) + 1
+            )
+        for n_b, cnt in sorted(resumen_multi.items()):
+            print(f"  {n_b} bloques: {cnt} secciones")
+
     multi_sem = [
         (c.codigo, carrera, sems)
         for c in cursos.values()
@@ -393,37 +700,23 @@ def _imprimir_resumen(datos: DatosProblema) -> None:
     ]
     if multi_sem:
         print(f"\nCursos con semestre distinto según plan: {len(multi_sem)}")
-        for codigo, carrera, sems in sorted(multi_sem):
+        for codigo, carrera, sems in sorted(multi_sem)[:10]:
             print(f"  {codigo} ({carrera}): {sorted(sems)}")
+        if len(multi_sem) > 10:
+            print(f"  ... y {len(multi_sem) - 10} más")
 
-    # Secciones por componente
-    por_componente: dict[str, int] = {}
-    for sec in secciones:
-        por_componente[sec.componente.value] = por_componente.get(sec.componente.value, 0) + 1
-    print(f"\nSecciones totales: {len(secciones)}")
-    for comp, n in sorted(por_componente.items()):
-        print(f"  {comp}: {n}")
+    if capacidad_por_tipo:
+        print(f"\nSalas especiales — tipo → salas físicas:")
+        for tipo, n in sorted(capacidad_por_tipo.items()):
+            print(f"  {tipo}: {n}")
 
-    # Profesores por tipo
-    por_tipo: dict[str, int] = {}
-    for prof in profesores.values():
-        por_tipo[prof.tipo.value] = por_tipo.get(prof.tipo.value, 0) + 1
-    print(f"\nProfesores totales: {len(profesores)}")
-    for tipo, n in sorted(por_tipo.items()):
-        print(f"  {tipo}: {n}")
+    sin_sem = [c.codigo for c in cursos.values() if not c.semestres_por_carrera]
+    if sin_sem:
+        print(f"\nCursos sin semestre en malla: {len(sin_sem)}")
 
-    # Secciones con múltiples bloques
-    multi = [s for s in secciones if s.cantidad_bloques_necesarios > 1]
-    print(f"\nSecciones con múltiples bloques: {len(multi)}")
-    if multi:
-        resumen_multi: dict[int, int] = {}
-        for s in multi:
-            n = s.cantidad_bloques_necesarios
-            resumen_multi[n] = resumen_multi.get(n, 0) + 1
-        for n_bloques, cnt in sorted(resumen_multi.items()):
-            print(f"  {n_bloques} bloques: {cnt} secciones")
+    ayud_mal = [s for s in secciones
+                if s.componente == TipoReunion.AYUD and s.afecta_disponibilidad]
+    if ayud_mal:
+        print(f"\n[ERROR] {len(ayud_mal)} sección(es) AYUD con afecta_disponibilidad=True")
 
-    ayud_no_afecta = [s for s in secciones
-                      if s.componente == TipoReunion.AYUD and not s.afecta_disponibilidad]
-    print(f"\nAYUD con afecta_disponibilidad=False: {len(ayud_no_afecta)}")
     print("=" * 60)
