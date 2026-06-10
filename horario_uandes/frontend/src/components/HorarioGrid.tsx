@@ -12,14 +12,33 @@ const DIAS: { key: Dia; label: string }[] = [
   { key: 'V', label: 'Viernes' },
 ]
 
-const FRANJAS = [
-  { hora: '8:30',  label: '08:30' },
-  { hora: '10:30', label: '10:30' },
-  { hora: '12:30', label: '12:30' },
-  { hora: '13:30', label: '13:30' },
-  { hora: '15:30', label: '15:30' },
-  { hora: '17:30', label: '17:30' },
-]
+// Inicios de bloque posibles, en orden cronológico (minutos desde medianoche).
+const HORA_ORDEN: Record<string, number> = {
+  '8:30': 510, '9:30': 570, '10:30': 630, '11:30': 690, '12:30': 750,
+  '13:30': 810, '14:30': 870, '15:30': 930, '16:30': 990, '17:30': 1050,
+}
+// Franjas estándar: siempre visibles aunque no tengan clases (grilla institucional).
+const FRANJAS_ESTANDAR = ['8:30', '10:30', '12:30', '13:30', '15:30', '17:30']
+
+interface Franja { hora: string; label: string; helper: boolean }
+
+function fmtHora(h: string): string {
+  const [hh, mm] = h.split(':')
+  return `${hh.padStart(2, '0')}:${mm}`
+}
+
+// Construye las filas de la grilla: estándar siempre + cualquier inicio "helper"
+// (9:30, 14:30, 16:30, …) que realmente aparezca en los datos.
+function buildFranjas(secciones: SeccionAsignada[]): Franja[] {
+  const horas = new Set<string>(FRANJAS_ESTANDAR)
+  for (const sec of secciones)
+    for (const b of sec.bloques)
+      horas.add(b.hora_inicio)
+  return Array.from(horas)
+    .filter(h => h in HORA_ORDEN)
+    .sort((a, b) => HORA_ORDEN[a] - HORA_ORDEN[b])
+    .map(h => ({ hora: h, label: fmtHora(h), helper: !FRANJAS_ESTANDAR.includes(h) }))
+}
 
 const DIAS_LABEL: Record<Dia, string> = {
   L: 'Lunes', M: 'Martes', X: 'Miércoles', J: 'Jueves', V: 'Viernes',
@@ -108,11 +127,11 @@ type GridMap = Map<Dia, Map<string, SeccionAsignada[]>>
 
 // ── buildGrid ─────────────────────────────────────────────────────────────────
 
-function buildGrid(secciones: SeccionAsignada[], filters: Filters): GridMap {
+function buildGrid(secciones: SeccionAsignada[], filters: Filters, franjas: Franja[]): GridMap {
   const grid: GridMap = new Map()
   for (const d of DIAS) {
     const dmap = new Map<string, SeccionAsignada[]>()
-    for (const f of FRANJAS) dmap.set(f.hora, [])
+    for (const f of franjas) dmap.set(f.hora, [])
     grid.set(d.key, dmap)
   }
 
@@ -155,7 +174,8 @@ export default function HorarioGrid({ secciones }: Props) {
     return Array.from(set).sort(compareSems)
   }, [secciones, filters.carrera])
 
-  const grid  = useMemo(() => buildGrid(secciones, filters), [secciones, filters])
+  const franjas = useMemo(() => buildFranjas(secciones), [secciones])
+  const grid  = useMemo(() => buildGrid(secciones, filters, franjas), [secciones, filters, franjas])
   const total = useMemo(() => {
     let n = 0
     grid.forEach(dm => dm.forEach(arr => { n += arr.length }))
@@ -269,10 +289,14 @@ export default function HorarioGrid({ secciones }: Props) {
             </tr>
           </thead>
           <tbody>
-            {FRANJAS.map((franja, fi) => (
-              <tr key={franja.hora} className={fi % 2 === 0 ? 'bg-white' : 'bg-gray-50/60'}>
+            {franjas.map((franja, fi) => (
+              <tr key={franja.hora}
+                  className={franja.helper ? 'bg-amber-50/40' : (fi % 2 === 0 ? 'bg-white' : 'bg-gray-50/60')}>
                 <td className="p-2 pr-3 text-right border-r border-gray-200 align-top">
-                  <span className="text-xs font-medium text-gray-400">{franja.label}</span>
+                  <span className={`text-xs font-medium ${franja.helper ? 'text-amber-600' : 'text-gray-400'}`}>
+                    {franja.label}
+                    {franja.helper && <span className="block text-[9px] text-amber-500">fuera de grilla</span>}
+                  </span>
                 </td>
                 {DIAS.map(d => {
                   const secs = grid.get(d.key)?.get(franja.hora) ?? []

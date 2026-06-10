@@ -1,6 +1,6 @@
-import { useMemo } from 'react'
-import { BookOpen, CalendarDays, CheckSquare, TrendingDown } from 'lucide-react'
-import type { MetricasResult, SeccionAsignada, TipoSeccion, Dia } from '../types'
+import { useMemo, useState } from 'react'
+import { BookOpen, CalendarDays, CheckSquare, TrendingDown, ChevronDown, ChevronRight, AlertTriangle, AlertCircle } from 'lucide-react'
+import type { MetricasResult, SeccionAsignada, TipoSeccion, Dia, ReporteDetallado, ViolacionItem } from '../types'
 
 // ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -33,11 +33,12 @@ const RESTRICCIONES = [
 interface Props {
   metricas: MetricasResult
   secciones: SeccionAsignada[]
+  reporte?: ReporteDetallado
 }
 
 // ── Componente ────────────────────────────────────────────────────────────────
 
-export default function MetricasPanel({ metricas, secciones }: Props) {
+export default function MetricasPanel({ metricas, secciones, reporte }: Props) {
 
   // Distribución por día
   const dayDist = useMemo(() => {
@@ -214,27 +215,46 @@ export default function MetricasPanel({ metricas, secciones }: Props) {
             <tr className="border-b border-gray-100">
               <th className="text-left pb-2 text-xs text-gray-400 font-medium w-12">ID</th>
               <th className="text-left pb-2 text-xs text-gray-400 font-medium">Descripción</th>
-              <th className="text-right pb-2 text-xs text-gray-400 font-medium">Peso</th>
+              <th className="text-right pb-2 text-xs text-gray-400 font-medium w-16">Peso</th>
+              {reporte && (
+                <th className="text-right pb-2 text-xs text-gray-400 font-medium w-24">
+                  Penalización
+                </th>
+              )}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
-            {RESTRICCIONES.map(rb => (
-              <tr key={rb.id}>
-                <td className="py-2 pr-4">
-                  <span className="text-[10px] font-bold bg-gray-100 text-gray-600
-                                   px-1.5 py-0.5 rounded">
-                    {rb.id}
-                  </span>
-                </td>
-                <td className="py-2 pr-4 text-gray-700 text-xs">{rb.label}</td>
-                <td className="py-2 text-right text-gray-400 text-xs tabular-nums">
-                  {rb.peso}
-                </td>
-              </tr>
-            ))}
+            {RESTRICCIONES.map(rb => {
+              const pen = reporte?.resumen.penalizacion_por_rb[rb.id] ?? null
+              return (
+                <tr key={rb.id}>
+                  <td className="py-2 pr-4">
+                    <span className="text-[10px] font-bold bg-gray-100 text-gray-600
+                                     px-1.5 py-0.5 rounded">
+                      {rb.id}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-4 text-gray-700 text-xs">{rb.label}</td>
+                  <td className="py-2 text-right text-gray-400 text-xs tabular-nums">
+                    {rb.peso}
+                  </td>
+                  {reporte && (
+                    <td className={`py-2 text-right text-xs tabular-nums font-medium
+                      ${pen ? 'text-amber-700' : 'text-green-600'}`}>
+                      {pen ? pen.toFixed(0) : '✓ 0'}
+                    </td>
+                  )}
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>
+
+      {/* ── Reporte de violaciones ────────────────────────────────────────── */}
+      {reporte && (
+        <ReporteViolaciones reporte={reporte} />
+      )}
 
     </div>
   )
@@ -260,6 +280,184 @@ function StatCard({
         {value}
       </div>
       <div className="text-xs text-gray-400 mt-1 leading-tight">{label}</div>
+    </div>
+  )
+}
+
+// ── Reporte de violaciones ────────────────────────────────────────────────────
+
+type Filtro = 'todas' | 'duras' | 'blandas'
+
+function ReporteViolaciones({ reporte }: { reporte: ReporteDetallado }) {
+  const [filtro, setFiltro] = useState<Filtro>('todas')
+  const { resumen, violaciones_duras, violaciones_blandas } = reporte
+
+  // Agrupar por tipo
+  const agrupar = (viols: ViolacionItem[]) => {
+    const map = new Map<string, ViolacionItem[]>()
+    for (const v of viols) {
+      if (!map.has(v.tipo)) map.set(v.tipo, [])
+      map.get(v.tipo)!.push(v)
+    }
+    return map
+  }
+  const gruposDuras   = agrupar(violaciones_duras)
+  const gruposBlandas = agrupar(violaciones_blandas)
+
+  const totalDuras   = resumen.total_duras
+  const totalBlandas = resumen.total_blandas
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-5 space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          Detalle de restricciones
+        </h3>
+        <div className="flex gap-1">
+          {(['todas', 'duras', 'blandas'] as Filtro[]).map(f => (
+            <button
+              key={f}
+              onClick={() => setFiltro(f)}
+              className={`text-[11px] px-2.5 py-1 rounded font-medium transition-colors
+                ${filtro === f
+                  ? 'bg-gray-800 text-white'
+                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                }`}
+            >
+              {f === 'todas' ? 'Todas' : f === 'duras' ? 'Duras' : 'Blandas'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Resumen rápido */}
+      <div className="flex gap-3">
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs font-medium
+          ${totalDuras === 0
+            ? 'bg-green-50 text-green-700 border border-green-200'
+            : 'bg-red-50 text-red-700 border border-red-200'
+          }`}>
+          <AlertCircle size={13} />
+          <span>{totalDuras} violación{totalDuras !== 1 ? 'es' : ''} dura{totalDuras !== 1 ? 's' : ''}</span>
+        </div>
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs font-medium
+          ${totalBlandas === 0
+            ? 'bg-green-50 text-green-700 border border-green-200'
+            : 'bg-amber-50 text-amber-700 border border-amber-200'
+          }`}>
+          <AlertTriangle size={13} />
+          <span>{totalBlandas} violación{totalBlandas !== 1 ? 'es' : ''} blanda{totalBlandas !== 1 ? 's' : ''}</span>
+        </div>
+      </div>
+
+      {/* Grupos de violaciones duras */}
+      {filtro !== 'blandas' && (
+        <div className="space-y-2">
+          {totalDuras === 0 ? (
+            <p className="text-xs text-green-600 font-medium px-1">
+              No se detectaron violaciones de restricciones duras.
+            </p>
+          ) : (
+            Array.from(gruposDuras.entries()).map(([tipo, viols]) => (
+              <GrupoViolaciones key={tipo} tipo={tipo} viols={viols} esDura />
+            ))
+          )}
+        </div>
+      )}
+
+      {/* Grupos de violaciones blandas */}
+      {filtro !== 'duras' && (
+        <div className="space-y-2">
+          {totalBlandas === 0 ? (
+            <p className="text-xs text-green-600 font-medium px-1">
+              No se detectaron violaciones de restricciones blandas.
+            </p>
+          ) : (
+            Array.from(gruposBlandas.entries()).map(([tipo, viols]) => (
+              <GrupoViolaciones key={tipo} tipo={tipo} viols={viols} esDura={false} />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const TIPO_LABEL_RD: Record<string, string> = {
+  RD1: 'Topes de malla',
+  RD3: 'Conflictos de profesor',
+  RD4: 'Conflictos de sala especial',
+}
+const TIPO_LABEL_RB: Record<string, string> = {
+  RB1: 'Labs Programación no consecutivos',
+  RB2: 'Profesores jornada en horarios extremos',
+  RB3: 'Componentes del mismo curso en mismo día',
+  RB4: 'Múltiples bloques del componente en un día',
+  RB5: 'Cambios respecto al histórico',
+}
+
+function GrupoViolaciones({
+  tipo, viols, esDura,
+}: {
+  tipo: string
+  viols: ViolacionItem[]
+  esDura: boolean
+}) {
+  const [abierto, setAbierto] = useState(esDura)  // duras abiertas por defecto
+  const label = esDura
+    ? (TIPO_LABEL_RD[tipo] ?? tipo)
+    : (TIPO_LABEL_RB[tipo] ?? tipo)
+
+  const headerCls = esDura
+    ? 'bg-red-50 border-red-200 text-red-800 hover:bg-red-100'
+    : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
+  const badgeCls = esDura
+    ? 'bg-red-200 text-red-800'
+    : 'bg-amber-200 text-amber-800'
+
+  return (
+    <div className={`border rounded-lg overflow-hidden ${esDura ? 'border-red-200' : 'border-amber-200'}`}>
+      <button
+        onClick={() => setAbierto(!abierto)}
+        className={`w-full flex items-center justify-between px-3 py-2.5 text-left
+          transition-colors ${headerCls}`}
+      >
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${badgeCls}`}>
+            {tipo}
+          </span>
+          <span className="text-xs font-medium">{label}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badgeCls}`}>
+            {viols.length}
+          </span>
+          {abierto
+            ? <ChevronDown size={13} className="shrink-0" />
+            : <ChevronRight size={13} className="shrink-0" />
+          }
+        </div>
+      </button>
+
+      {abierto && (
+        <ul className="divide-y divide-gray-100">
+          {viols.map((v, idx) => (
+            <li key={idx} className="px-3 py-2.5 bg-white">
+              <p className="text-xs text-gray-800 leading-relaxed">{v.mensaje}</p>
+              {v.contexto && (
+                <p className="text-[11px] text-gray-400 mt-1">{v.contexto}</p>
+              )}
+              {v.penalizacion != null && (
+                <span className="inline-block mt-1 text-[10px] font-medium
+                                 bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">
+                  −{v.penalizacion.toFixed(0)} pts
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

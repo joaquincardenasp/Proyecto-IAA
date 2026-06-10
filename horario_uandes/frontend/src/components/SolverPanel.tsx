@@ -5,31 +5,18 @@ import type { StatusResponse } from '../types'
 
 // ── Archivos esperados ────────────────────────────────────────────────────────
 
-const EXPECTED: { name: string; label: string; required: boolean }[] = [
+const EXPECTED: { name: string; label: string; required: boolean; hint?: string }[] = [
   {
-    name:     'Copia de Catálogo PE 2022.xlsx',
-    label:    'Catálogo Plan de Estudios 2022',
+    name:     'Maestro_XXXXXX.xlsx',
+    label:    'Maestro de secciones',
     required: true,
-  },
-  {
-    name:     'Copia de Catálogo PE 2022 y PE 2025.xlsx',
-    label:    'Catálogo PE 2022 + PE 2025',
-    required: true,
-  },
-  {
-    name:     'Copia de Catálogo PE 2026.xlsx',
-    label:    'Catálogo Plan de Estudios 2026',
-    required: true,
-  },
-  {
-    name:     'profesores_completo.xlsx',
-    label:    'Nómina de profesores y disponibilidad',
-    required: true,
+    hint:     'El nombre debe comenzar con "Maestro". Contiene hojas MAESTRO y PROFESORES.',
   },
   {
     name:     'SALAS_ESPECIALES_ING.xlsx',
     label:    'Salas especiales de Ingeniería',
     required: false,
+    hint:     'Contiene hojas BBDD y SALAS ESPECIALES.',
   },
 ]
 
@@ -94,8 +81,8 @@ export default function SolverPanel({ status, onSolveStarted }: Props) {
           Archivos de entrada
         </h2>
         <p className="text-sm text-gray-500 mb-5">
-          Sube los archivos Excel del sistema curricular. Si los archivos ya están
-          en el servidor, puedes omitir este paso y generar directamente.
+          Sube el Maestro del semestre y, opcionalmente, el archivo de salas especiales.
+          Si ya están en el servidor puedes omitir este paso y generar directamente.
         </p>
 
         {/* Zona de arrastre */}
@@ -153,29 +140,40 @@ export default function SolverPanel({ status, onSolveStarted }: Props) {
         {/* Lista de archivos esperados */}
         <div className="mt-4 border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
           {EXPECTED.map(f => {
-            const isUploaded = uploaded.has(f.name)
+            // El Maestro puede tener nombre variable (Maestro_202510.xlsx, etc.)
+            // así que hacemos matching por prefijo
+            const prefix = f.name.replace('XXXXXX.xlsx', '').toLowerCase()
+            const isUploaded = prefix
+              ? [...uploaded].some(n => n.toLowerCase().startsWith(prefix))
+              : uploaded.has(f.name)
             return (
-              <div key={f.name} className="flex items-center gap-3 px-4 py-2.5 bg-white">
-                <FileSpreadsheet size={14} className="text-gray-300 shrink-0" />
+              <div key={f.name} className="flex items-start gap-3 px-4 py-3 bg-white">
+                <FileSpreadsheet size={14} className="text-gray-300 shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
-                  <p className={`text-xs truncate leading-tight
+                  <p className={`text-xs leading-tight
                     ${isUploaded ? 'text-gray-900 font-medium' : 'text-gray-600'}`}>
                     {f.label}
                   </p>
-                  <p className="text-[10px] text-gray-400 truncate mt-0.5">{f.name}</p>
+                  <p className="text-[10px] text-gray-400 mt-0.5">{f.name}</p>
+                  {f.hint && (
+                    <p className="text-[10px] text-gray-400 mt-0.5 leading-relaxed">
+                      {f.hint}
+                    </p>
+                  )}
                 </div>
-                {f.required
-                  ? <span className="text-[10px] font-medium text-gray-400 uppercase
-                                     tracking-wide shrink-0">
-                      requerido
-                    </span>
-                  : <span className="text-[10px] text-gray-300 uppercase tracking-wide shrink-0">
-                      opcional
-                    </span>
-                }
-                {isUploaded && (
-                  <CheckCircle2 size={15} className="text-green-600 shrink-0" />
-                )}
+                <div className="flex items-center gap-2 shrink-0 mt-0.5">
+                  {f.required
+                    ? <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">
+                        requerido
+                      </span>
+                    : <span className="text-[10px] text-gray-300 uppercase tracking-wide">
+                        opcional
+                      </span>
+                  }
+                  {isUploaded && (
+                    <CheckCircle2 size={15} className="text-green-600" />
+                  )}
+                </div>
               </div>
             )
           })}

@@ -30,9 +30,43 @@ export interface MetricasResult {
   estado_cpsat: string
 }
 
+export interface SeccionRef {
+  id: string
+  codigo: string
+  titulo: string
+  seccion: string
+  tipo: string   // CLAS | AYUD | LABT
+}
+
+export interface ViolacionItem {
+  tipo: string          // "RD1" | "RD3" | "RD4" | "RB1" | ... | "RB5"
+  descripcion: string   // label corto: "Tope de malla", "Conflicto de profesor", ...
+  mensaje: string       // descripción completa legible
+  secciones: SeccionRef[]
+  bloques: string[]     // ["Martes 10:30-12:20", ...]
+  contexto: string      // "ICI · semestre 5", "Prof. Juan Pérez", ...
+  penalizacion: number | null
+}
+
+export interface ResumenReporte {
+  total_duras: number
+  total_blandas: number
+  por_tipo_dura: Record<string, number>
+  por_tipo_blanda: Record<string, number>
+  penalizacion_total: number
+  penalizacion_por_rb: Record<string, number>
+}
+
+export interface ReporteDetallado {
+  resumen: ResumenReporte
+  violaciones_duras: ViolacionItem[]
+  violaciones_blandas: ViolacionItem[]
+}
+
 export interface SolveResult {
   metricas: MetricasResult
   secciones: SeccionAsignada[]
+  reporte?: ReporteDetallado
 }
 
 export interface StatusResponse {
