@@ -5,9 +5,10 @@ Flujo:
   1. POST /api/upload      → sube archivos Excel a inputs/
   2. POST /api/solve       → lanza CP-SAT + GA en background
   3. GET  /api/status      → consulta progreso
-  4. GET  /api/results     → devuelve JSON con secciones y métricas
-  5. GET  /api/export      → descarga el .xlsx generado
-  6. GET  /api/health      → health check
+  4. GET  /api/results     → devuelve JSON con secciones, métricas y reporte
+  5. GET  /api/report      → devuelve solo el reporte de violaciones
+  6. GET  /api/export      → descarga el .xlsx generado
+  7. GET  /api/health      → health check
 """
 from __future__ import annotations
 
@@ -15,16 +16,16 @@ import asyncio
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from ..core.blocks import TODOS_BLOQUES
-from ..core.exporter import exportar_horario
+from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
 from ..core.parser import cargar_datos
 from ..core.parser_historico import leer_historico
+from ..core.reporter import generar_reporte_detallado
 from ..core.solver_cpsat import resolver
 from ..core.solver_ga import (
     PESOS,
@@ -36,10 +37,14 @@ from ..core.solver_ga import (
 from ..schemas.solve import (
     BloqueAsignado,
     MetricasResult,
+    ReporteDetallado,
+    ResumenReporte,
     SeccionAsignada,
+    SeccionRef,
     SolveRequest,
     SolveResult,
     StatusResponse,
+    ViolacionItem,
 )
 
 router = APIRouter()
@@ -57,10 +62,11 @@ _state: dict = {
     "error":        "",
     "asignaciones": None,     # dict[str, list[int]]
     "metricas":     None,     # dict
+    "reporte":      None,     # dict (salida de generar_reporte_detallado)
     "excel_bytes":  None,     # bytes
     "datos":        None,     # DatosProblema
 }
-_lock    = asyncio.Lock()
+_lock     = asyncio.Lock()
 _executor = ThreadPoolExecutor(max_workers=1)
 
 
@@ -75,26 +81,9 @@ def _set_progress(msg: str) -> None:
 def _solve_sync(req: SolveRequest) -> None:
     try:
         _set_progress("Cargando datos…")
-        datos    = cargar_datos(INPUTS_DIR)
+        datos     = cargar_datos(INPUTS_DIR)
         historico = leer_historico(INPUTS_DIR)
         _state["datos"] = datos
-        
-        # DEBUG
-        from collections import defaultdict
-        grupos_sem = defaultdict(list)
-        for s in datos.secciones:
-            curso = datos.cursos.get(s.codigo_curso)
-            if not curso:
-                continue
-            for carrera, sems in curso.semestres_por_carrera.items():
-                for sem in sems:
-                    grupos_sem[(carrera, sem)].append(s.id)
-
-        print("Semestre más cargado:")
-        mas_cargado = max(grupos_sem.items(), key=lambda x: len(x[1]))
-        print(f"  {mas_cargado[0]}: {len(mas_cargado[1])} secciones")
-        print(f"  Total secciones: {len(datos.secciones)}")
-        # FIN DEBUG
 
         _set_progress("Ejecutando CP-SAT…")
         resultado_cpsat = resolver(
@@ -117,7 +106,7 @@ def _solve_sync(req: SolveRequest) -> None:
 
         asignaciones = resultado_ga.asignaciones
 
-        _set_progress("Calculando métricas…")
+        _set_progress("Calculando métricas y reporte…")
         ctx           = construir_contexto(datos, resultado_cpsat.asignaciones, historico)
         fitness_cpsat = calcular_fitness(encode(resultado_cpsat.asignaciones, ctx), ctx)[0]
         fitness_ga    = resultado_ga.fitness_final
@@ -127,19 +116,26 @@ def _solve_sync(req: SolveRequest) -> None:
         )
         n_bloques_totales = sum(len(b) for b in asignaciones.values())
 
+        reporte_raw = generar_reporte_detallado(datos, asignaciones, historico)
+
+        # Desglose para Excel (usa penalizacion_por_rb del reporte)
+        pen_rb = reporte_raw["resumen"]["penalizacion_por_rb"]
         metricas_dict = {
-            "fitness_cpsat":    fitness_cpsat,
-            "fitness_ga":       fitness_ga,
-            "mejora_pct":       mejora_pct,
-            "rb_detalle":       {f"RB{k+1} (peso {v})": "—" for k, v in enumerate(PESOS.values())},
+            "fitness_cpsat": fitness_cpsat,
+            "fitness_ga":    fitness_ga,
+            "mejora_pct":    mejora_pct,
+            "rb_detalle": {
+                f"RB{k+1} (peso {v})": pen_rb.get(f"RB{k+1}", 0)
+                for k, v in enumerate(PESOS.values())
+            },
         }
         metricas_api = {
-            "fitness_cpsat":    fitness_cpsat,
-            "fitness_ga":       fitness_ga,
-            "mejora_pct":       mejora_pct,
-            "n_secciones":      len(asignaciones),
+            "fitness_cpsat":     fitness_cpsat,
+            "fitness_ga":        fitness_ga,
+            "mejora_pct":        mejora_pct,
+            "n_secciones":       len(asignaciones),
             "n_bloques_totales": n_bloques_totales,
-            "estado_cpsat":     resultado_cpsat.estado,
+            "estado_cpsat":      resultado_cpsat.estado,
         }
 
         _set_progress("Generando Excel…")
@@ -149,13 +145,18 @@ def _solve_sync(req: SolveRequest) -> None:
                 datos, asignaciones,
                 output_path=OUTPUTS_DIR / "horario_generado.xlsx",
                 metricas=metricas_dict,
+                reporte=reporte_raw,
             )
         except PermissionError:
-            # El archivo puede estar abierto en Excel; generamos los bytes igualmente
-            excel_bytes = exportar_horario(datos, asignaciones, metricas=metricas_dict)
+            excel_bytes = exportar_horario(
+                datos, asignaciones,
+                metricas=metricas_dict,
+                reporte=reporte_raw,
+            )
 
         _state["asignaciones"] = asignaciones
         _state["metricas"]     = metricas_api
+        _state["reporte"]      = reporte_raw
         _state["excel_bytes"]  = excel_bytes
         _state["status"]       = "ready"
         _state["progress"]     = "Completado"
@@ -174,6 +175,78 @@ async def _solve_background(req: SolveRequest) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Helpers de serialización
+# ---------------------------------------------------------------------------
+
+def _build_secciones(datos: DatosProblema, asignaciones: dict) -> list[SeccionAsignada]:
+    sec_by_id = {s.id: s for s in datos.secciones}
+    result: list[SeccionAsignada] = []
+    for sec_id, bloques_idx in asignaciones.items():
+        s = sec_by_id.get(sec_id)
+        if not s:
+            continue
+        curso = datos.cursos.get(s.codigo_curso)
+        prof  = datos.profesores.get(s.rut_profesor)
+
+        bloques_list = [
+            BloqueAsignado(
+                dia=TODOS_BLOQUES[i].dia.value,
+                hora_inicio=TODOS_BLOQUES[i].hora_inicio,
+                hora_fin=TODOS_BLOQUES[i].hora_fin,
+                tipo_bloque=TODOS_BLOQUES[i].tipo,
+            )
+            for i in bloques_idx
+        ]
+        cars_parts, sems_parts = [], []
+        if curso:
+            for car in _CARRERAS:
+                sems = curso.semestres_por_carrera.get(car)
+                if sems:
+                    cars_parts.append(car)
+                    sems_parts.append("/".join(sorted(sems, key=_sem_sort_key)))
+
+        result.append(SeccionAsignada(
+            id=sec_id,
+            codigo=s.codigo_curso,
+            titulo=curso.titulo if curso else "",
+            seccion=s.seccion,
+            tipo=s.componente.value,
+            profesor=prof.nombre if prof else s.rut_profesor,
+            bloques=bloques_list,
+            carreras=" · ".join(cars_parts),
+            semestres=" · ".join(sems_parts),
+        ))
+    return result
+
+
+def _build_reporte(reporte_raw: dict) -> ReporteDetallado:
+    def _viol(v: dict) -> ViolacionItem:
+        return ViolacionItem(
+            tipo=v["tipo"],
+            descripcion=v["descripcion"],
+            mensaje=v["mensaje"],
+            secciones=[SeccionRef(**s) for s in v["secciones"]],
+            bloques=v["bloques"],
+            contexto=v["contexto"],
+            penalizacion=v.get("penalizacion"),
+        )
+
+    res = reporte_raw["resumen"]
+    return ReporteDetallado(
+        resumen=ResumenReporte(
+            total_duras=res["total_duras"],
+            total_blandas=res["total_blandas"],
+            por_tipo_dura=res["por_tipo_dura"],
+            por_tipo_blanda=res["por_tipo_blanda"],
+            penalizacion_total=res["penalizacion_total"],
+            penalizacion_por_rb=res["penalizacion_por_rb"],
+        ),
+        violaciones_duras=[_viol(v) for v in reporte_raw["violaciones_duras"]],
+        violaciones_blandas=[_viol(v) for v in reporte_raw["violaciones_blandas"]],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -185,13 +258,25 @@ def health():
 @router.post("/upload")
 async def upload_files(files: list[UploadFile] = File(...)):
     """Sube uno o más archivos Excel al directorio inputs/."""
-    INPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    saved = []
-    for f in files:
-        dest = INPUTS_DIR / f.filename
-        dest.write_bytes(await f.read())
-        saved.append(f.filename)
-    return {"uploaded": saved}
+    try:
+        INPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        saved = []
+        for f in files:
+            # Usar solo el nombre base para evitar rutas relativas/absolutas peligrosas
+            nombre = Path(f.filename or "").name
+            if not nombre:
+                continue  # ignorar entradas sin nombre de archivo
+            contenido = await f.read()
+            (INPUTS_DIR / nombre).write_bytes(contenido)
+            saved.append(nombre)
+        if not saved:
+            raise HTTPException(status_code=400, detail="No se recibió ningún archivo válido")
+        return {"uploaded": saved}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error al guardar archivos: {exc}")
 
 
 @router.post("/solve", status_code=202)
@@ -205,6 +290,7 @@ async def solve(req: SolveRequest, background_tasks: BackgroundTasks):
         _state["error"]        = ""
         _state["asignaciones"] = None
         _state["metricas"]     = None
+        _state["reporte"]      = None
         _state["excel_bytes"]  = None
 
     background_tasks.add_task(_solve_background, req)
@@ -222,57 +308,14 @@ def get_status():
 
 @router.get("/results", response_model=SolveResult)
 def get_results():
-    """Devuelve JSON con secciones y métricas. 404 si aún no está listo."""
+    """Devuelve secciones, métricas y reporte de violaciones. 404 si no está listo."""
     if _state["status"] != "ready":
         raise HTTPException(
             status_code=404,
             detail=f"Resultados no disponibles (status={_state['status']})",
         )
-
-    datos: DatosProblema          = _state["datos"]
-    asignaciones: dict[str, list[int]] = _state["asignaciones"]
-    metricas_raw: dict            = _state["metricas"]
-    sec_by_id = {s.id: s for s in datos.secciones}
-
-    secciones: list[SeccionAsignada] = []
-    for sec_id, bloques_idx in asignaciones.items():
-        s     = sec_by_id.get(sec_id)
-        if not s:
-            continue
-        curso = datos.cursos.get(s.codigo_curso)
-        prof  = datos.profesores.get(s.rut_profesor)
-
-        bloques_list: list[BloqueAsignado] = [
-            BloqueAsignado(
-                dia=TODOS_BLOQUES[i].dia.value,
-                hora_inicio=TODOS_BLOQUES[i].hora_inicio,
-                hora_fin=TODOS_BLOQUES[i].hora_fin,
-                tipo_bloque=TODOS_BLOQUES[i].tipo,
-            )
-            for i in bloques_idx
-        ]
-
-        cars_parts, sems_parts = [], []
-        if curso:
-            from ..core.exporter import _CARRERAS, _sem_sort_key
-            for car in _CARRERAS:
-                sems = curso.semestres_por_carrera.get(car)
-                if sems:
-                    cars_parts.append(car)
-                    sems_parts.append("/".join(sorted(sems, key=_sem_sort_key)))
-
-        secciones.append(SeccionAsignada(
-            id=sec_id,
-            codigo=s.codigo_curso,
-            titulo=curso.titulo if curso else "",
-            seccion=s.seccion,
-            tipo=s.componente.value,
-            profesor=prof.nombre if prof else s.rut_profesor,
-            bloques=bloques_list,
-            carreras=" · ".join(cars_parts),
-            semestres=" · ".join(sems_parts),
-        ))
-
+    secciones = _build_secciones(_state["datos"], _state["asignaciones"])
+    metricas_raw = _state["metricas"]
     metricas = MetricasResult(
         fitness_cpsat=metricas_raw["fitness_cpsat"],
         fitness_ga=metricas_raw["fitness_ga"],
@@ -281,8 +324,19 @@ def get_results():
         n_bloques_totales=metricas_raw["n_bloques_totales"],
         estado_cpsat=metricas_raw["estado_cpsat"],
     )
+    reporte = _build_reporte(_state["reporte"]) if _state["reporte"] else None
+    return SolveResult(metricas=metricas, secciones=secciones, reporte=reporte)
 
-    return SolveResult(metricas=metricas, secciones=secciones)
+
+@router.get("/report", response_model=ReporteDetallado)
+def get_report():
+    """Devuelve solo el reporte de violaciones. 404 si no está listo."""
+    if _state["status"] != "ready" or _state["reporte"] is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Reporte no disponible (status={_state['status']})",
+        )
+    return _build_reporte(_state["reporte"])
 
 
 @router.get("/export")

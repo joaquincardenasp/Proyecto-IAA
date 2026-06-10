@@ -6,6 +6,7 @@ Hojas:
   "Plan Común"    — Secciones filtradas por carrera, agrupadas por semestre
   "ICI" … "ICQ"  — Ídem por carrera
   "Métricas"      — Resumen estadístico y fitness de restricciones blandas
+  "REPORTE"       — Detalle de todas las violaciones de restricciones (si se pasa reporte)
 """
 from __future__ import annotations
 
@@ -339,6 +340,121 @@ def _sheet_metricas(wb: openpyxl.Workbook,
 
 
 # ---------------------------------------------------------------------------
+# Sheet: REPORTE de violaciones
+# ---------------------------------------------------------------------------
+
+_C_DURA   = "FFDCE1"   # rojo claro
+_C_BLANDA = "FFF2CC"   # amarillo claro
+_C_DURA_H = "C00000"   # rojo oscuro para header
+_C_BLAND_H = "BF8F00"  # amarillo oscuro para header
+
+
+def _sheet_reporte(wb: openpyxl.Workbook, reporte: dict) -> None:
+    ws = wb.create_sheet("REPORTE")
+
+    HEADERS = ["Tipo", "Restricción", "Descripción detallada",
+               "Curso / Sección 1", "Curso / Sección 2",
+               "Bloque(s)", "Contexto", "Penalización"]
+
+    # Fila de encabezado
+    for col, h in enumerate(HEADERS, start=1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.fill = _fill(_C["header_dark"])
+        cell.font = _font(bold=True, color="FFFFFF")
+        cell.alignment = _align("center")
+        cell.border = _border_thin()
+    ws.row_dimensions[1].height = 22
+
+    r = 2
+
+    def _escribir_grupo(titulo: str, violaciones: list[dict], bg_header: str) -> None:
+        nonlocal r
+        if not violaciones:
+            return
+        # Banner del grupo
+        cell = ws.cell(row=r, column=1, value=titulo)
+        cell.font = _font(bold=True, color="FFFFFF")
+        cell.fill = _fill(bg_header)
+        cell.alignment = _align("left")
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(HEADERS))
+        ws.row_dimensions[r].height = 16
+        r += 1
+
+        for v in violaciones:
+            secs = v.get("secciones", [])
+            sec1 = f"{secs[0]['codigo']}-{secs[0]['seccion']} {secs[0]['tipo']}" if secs else ""
+            sec2 = (
+                f"{secs[1]['codigo']}-{secs[1]['seccion']} {secs[1]['tipo']}"
+                if len(secs) > 1 else ""
+            )
+            # Color de fila según si es dura o blanda
+            es_dura = not v.get("penalizacion")
+            bg = _C_DURA if es_dura else _C_BLANDA
+
+            vals = [
+                v["tipo"],
+                v["descripcion"],
+                v["mensaje"],
+                sec1,
+                sec2,
+                " / ".join(v.get("bloques", [])),
+                v.get("contexto", ""),
+                v.get("penalizacion") or "",
+            ]
+            for col, val in enumerate(vals, start=1):
+                cell = ws.cell(row=r, column=col, value=val)
+                cell.fill = _fill(bg)
+                cell.font = _font()
+                cell.alignment = _align("left") if col in (3, 4, 5, 7) else _align("center")
+                cell.border = _border_thin()
+                cell.alignment = Alignment(
+                    horizontal="left" if col in (3, 4, 5, 7) else "center",
+                    vertical="center",
+                    wrap_text=True,
+                )
+            ws.row_dimensions[r].height = 30
+            r += 1
+
+    duras   = reporte.get("violaciones_duras", [])
+    blandas = reporte.get("violaciones_blandas", [])
+    res     = reporte.get("resumen", {})
+
+    # Resumen en las primeras filas antes de los grupos
+    ws.insert_rows(1, amount=5)
+    r += 5
+
+    def _rsm(row: int, label: str, value) -> None:
+        lc = ws.cell(row=row, column=1, value=label)
+        lc.font = _font(bold=True)
+        vc = ws.cell(row=row, column=2, value=value)
+        vc.font = _font()
+
+    _rsm(1, "Total violaciones duras (RD1/RD3/RD4)", res.get("total_duras", 0))
+    _rsm(2, "Total violaciones blandas (RB1–RB5)",   res.get("total_blandas", 0))
+    _rsm(3, "Penalización total blandas",             res.get("penalizacion_total", 0))
+    _rsm(4, "Desglose por RB", " | ".join(
+        f"{k}: {v:.0f}" for k, v in sorted(res.get("penalizacion_por_rb", {}).items())
+    ))
+    ws.row_dimensions[5].height = 6   # separador visual
+
+    _escribir_grupo(
+        f"RESTRICCIONES DURAS — {res.get('total_duras', 0)} violaciones "
+        "(deberían ser 0)",
+        duras, _C_DURA_H,
+    )
+    _escribir_grupo(
+        f"RESTRICCIONES BLANDAS — {res.get('total_blandas', 0)} violaciones",
+        blandas, _C_BLAND_H,
+    )
+
+    col_widths = [8, 28, 60, 28, 28, 28, 32, 12]
+    for i, w in enumerate(col_widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    ws.freeze_panes = "A7"  # debajo del resumen y del encabezado de columnas
+
+
+# ---------------------------------------------------------------------------
 # Función pública
 # ---------------------------------------------------------------------------
 
@@ -347,6 +463,7 @@ def exportar_horario(
     asignaciones: dict[str, list[int]],
     output_path: str | Path | None = None,
     metricas: Optional[dict] = None,
+    reporte: Optional[dict] = None,
 ) -> bytes:
     """
     Genera un archivo Excel con el horario completo.
@@ -367,6 +484,8 @@ def exportar_horario(
     for carrera in _CARRERAS:
         _sheet_carrera(wb, datos, asignaciones, carrera)
     _sheet_metricas(wb, datos, asignaciones, metricas)
+    if reporte:
+        _sheet_reporte(wb, reporte)
 
     buf = io.BytesIO()
     wb.save(buf)

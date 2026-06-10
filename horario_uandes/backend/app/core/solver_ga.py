@@ -22,7 +22,7 @@ from typing import Any
 
 from deap import base, creator, tools
 
-from .blocks import MATRIZ_SOLAPAMIENTO, N_BLOQUES, TODOS_BLOQUES
+from .blocks import MATRIZ_SOLAPAMIENTO, N_BLOQUES, SET_ESTANDAR, TODOS_BLOQUES
 from .models import DatosProblema, TipoProfesor, TipoReunion
 
 # ---------------------------------------------------------------------------
@@ -36,6 +36,11 @@ PESOS: dict[str, int] = {
     "RB4":  50,
     "RB5":  60,
 }
+
+# Preferencia por la grilla estándar: cada bloque helper (no estándar) usado suma
+# esta penalización. Mantiene las clases en los horarios institucionales salvo que
+# la disponibilidad del profesor obligue a un horario fuera de la grilla.
+PESO_BLOQUE_HELPER = 40
 
 CURSO_PROGRAMACION = "ING1103"
 
@@ -76,7 +81,7 @@ class GAContexto:
     rep_es_jornada: list[bool]
     rep_disponibles: list[list[int]]          # índices de bloques válidos por rep
     conflictos: list[set[int]]                # rep_idx → set de rep_idx conflictivos
-    reps_por_curso: dict[str, dict[str, int]] # {codigo: {comp_str: rep_idx}}
+    reps_por_curso: dict[str, dict[str, list[int]]]  # {codigo: {comp_str: [rep_idx, ...]}}
     historico_rep: list[set[int]]             # bloques históricos por rep
     rep_seccion_ids: list[list[str]]          # todos los sec_id del grupo del rep
     rep_es_prog_labt: list[bool]              # RB1: es ING1103-LABT
@@ -92,23 +97,21 @@ def construir_contexto(
     """Construye el contexto del GA a partir de la solución CP-SAT."""
     sec_by_id = {s.id: s for s in datos.secciones}
 
-    # Agrupar secciones asignadas por (codigo_curso, componente)
-    grupos: dict[tuple, list[str]] = defaultdict(list)
-    for sec_id in asignaciones:
-        s = sec_by_id.get(sec_id)
-        if s:
-            grupos[(s.codigo_curso, s.componente)].append(sec_id)
-
-    # Representantes: el primero de cada grupo (orden determinista por código+componente)
+    # Cada sección es su propio representante. El paralelismo ya lo decidió CP-SAT
+    # (secciones del mismo curso pueden compartir bloque o no); el GA conserva los
+    # bloques por sección y optimiza las restricciones blandas.
     reps_list: list[str] = []
-    reps_por_curso: dict[str, dict[str, int]] = defaultdict(dict)
+    reps_por_curso: dict[str, dict[str, list[int]]] = defaultdict(dict)
     rep_seccion_ids: list[list[str]] = []
 
-    for (codigo, comp), ids in sorted(grupos.items(), key=lambda x: (x[0][0], x[0][1].value)):
+    for sec_id in sorted(asignaciones):
+        s = sec_by_id.get(sec_id)
+        if not s:
+            continue
         rep_idx = len(reps_list)
-        reps_list.append(sorted(ids)[0])   # primer sec_id en orden lexicográfico
-        reps_por_curso[codigo][comp.value] = rep_idx
-        rep_seccion_ids.append(sorted(ids))
+        reps_list.append(sec_id)
+        reps_por_curso[s.codigo_curso].setdefault(s.componente.value, []).append(rep_idx)
+        rep_seccion_ids.append([sec_id])
 
     n_reps = len(reps_list)
 
@@ -128,15 +131,28 @@ def construir_contexto(
         rep_es_ayud.append(es_ayud)
         rep_prof.append(s.rut_profesor)
 
-        # RB2: penalizar si CUALQUIER sección del grupo tiene prof jornada
+        # RB2: penalizar si alguna sección del grupo es dictada por un prof jornada.
+        # Solo cuenta si afecta_disponibilidad=True: una sección dictada por un TA
+        # (AYUD, o LABT sin prof) no ata al profesor de cátedra a ese bloque.
         es_jornada = any(
-            datos.profesores.get(sec_by_id[sid].rut_profesor, None) is not None
+            sec_by_id[sid].afecta_disponibilidad
+            and datos.profesores.get(sec_by_id[sid].rut_profesor) is not None
             and datos.profesores[sec_by_id[sid].rut_profesor].tipo == TipoProfesor.JORNADA
             for sid in rep_seccion_ids[i]
         )
         rep_es_jornada.append(es_jornada)
 
-        disponibles = _BLOQUES_VALIDOS_AYUD.copy() if es_ayud else list(range(N_BLOQUES))
+        # Bloques disponibles para este rep (debe coincidir con el dominio de CP-SAT):
+        #   AYUD → solo desde 12:30 (RD7)
+        #   con disponibilidad declarada → bloques del profesor (estándar + helper)
+        #   sin disponibilidad → solo bloques ESTÁNDAR (preserva la grilla institucional)
+        base = _BLOQUES_VALIDOS_AYUD.copy() if es_ayud else list(range(N_BLOQUES))
+        prof = datos.profesores.get(s.rut_profesor) if s.rut_profesor else None
+        tiene_disp = s.afecta_disponibilidad and prof is not None and bool(prof.disponibilidad)
+        if tiene_disp:
+            disponibles = [b for b in base if b in prof.disponibilidad]
+        else:
+            disponibles = [b for b in base if b in SET_ESTANDAR]
         rep_disponibles.append(disponibles)
 
         rep_es_prog_labt.append(
@@ -150,12 +166,18 @@ def construir_contexto(
         conflictos[ri].add(rj)
         conflictos[rj].add(ri)
 
-    # RC inter-componente: mismo curso, distintos componentes → no solapar
-    for comp_map in reps_por_curso.values():
-        idxs = list(comp_map.values())
+    # NRC: dentro de una MISMA sección (codigo, seccion), los componentes
+    # CLAS-k/AYUD-k/LABT-k no se solapan (el alumno asiste a los tres).
+    por_nrc: dict[tuple, list[int]] = defaultdict(list)
+    for i, rep_id in enumerate(reps_list):
+        s = sec_by_id[rep_id]
+        por_nrc[(s.codigo_curso, str(s.seccion))].append(i)
+    for idxs in por_nrc.values():
         for a in range(len(idxs)):
             for b in range(a + 1, len(idxs)):
-                _add(idxs[a], idxs[b])
+                ri, rj = idxs[a], idxs[b]
+                if sec_by_id[reps_list[ri]].componente != sec_by_id[reps_list[rj]].componente:
+                    _add(ri, rj)
 
     # RD1: mismo (carrera, semestre), cursos distintos → no solapar
     for carrera in {car for c in datos.cursos.values() for car in c.semestres_por_carrera}:
@@ -175,25 +197,32 @@ def construir_contexto(
                         continue
                     _add(ri, rj)
 
-    # RD3: mismo profesor (afecta_disponibilidad), cursos distintos → no solapar
-    # Considerar TODAS las secciones del grupo (RC las sincroniza al mismo bloque que el rep)
-    # RD3: mismo profesor (afecta_disponibilidad), cursos distintos → no solapar
+    # RD3: mismo profesor real (afecta_disponibilidad) → no solapar, en cualquier rol.
+    # Se agrupan TODAS las secciones (de todos los reps) por su profesor real y se
+    # conecta cada par de reps que comparta profesor. Ya NO se excluye el mismo curso:
+    #   - Dos LABT del mismo curso con la misma profesora (caso Biología) DEBEN no solapar.
+    #   - Un mismo profesor que dicta LABT de un curso y CLAS de otro tampoco puede solapar.
+    # Conectar el mismo par dos veces es inocuo (el grafo es un set).
     por_prof_set: dict[str, set[int]] = defaultdict(set)
     for i, sec_ids in enumerate(rep_seccion_ids):
         for sec_id in sec_ids:
             s = sec_by_id[sec_id]
-            if s.afecta_disponibilidad and s.rut_profesor:  # ← el fix va aquí
+            if s.afecta_disponibilidad and s.rut_profesor:
                 por_prof_set[s.rut_profesor].add(i)
     for prof_idxs in por_prof_set.values():
         idxs = sorted(prof_idxs)
         for a in range(len(idxs)):
             for b in range(a + 1, len(idxs)):
-                ri, rj = idxs[a], idxs[b]
-                if sec_by_id[reps_list[ri]].codigo_curso == sec_by_id[reps_list[rj]].codigo_curso:
-                    continue
-                _add(ri, rj)
+                _add(idxs[a], idxs[b])
 
-    # RD4: misma sala especial (CLAS/LABT, cursos distintos) → no solapar
+    # RD4: misma sala especial (CLAS/LABT) → no solapar, según capacidad física.
+    #   capacidad == 1  → ningún par puede coincidir (incluido mismo curso).
+    #   capacidad desconocida o > 1 → solo se conectan cursos distintos.
+    # Nota: el grafo de conflictos es binario y no expresa "a lo más C secciones por
+    # bloque". Para capacidad > 1 esto puede sub-restringir entre secciones del mismo
+    # curso; la factibilidad de capacidad la garantiza CP-SAT (punto de partida del GA)
+    # y el reporter señala cualquier exceso. Ver _agregar_rd4 en solver_cpsat.py.
+    cap = datos.capacidad_por_sala
     por_sala: dict[str, list[int]] = defaultdict(list)
     for i, rep_id in enumerate(reps_list):
         s = sec_by_id[rep_id]
@@ -202,13 +231,21 @@ def construir_contexto(
         curso = datos.cursos.get(s.codigo_curso)
         if curso and curso.sala_especial:
             por_sala[curso.sala_especial].append(i)
-    for idxs in por_sala.values():
+    for sala, idxs in por_sala.items():
+        capacidad = cap.get(sala)
+        if capacidad is None:
+            capacidad = 1   # desconocida → asumir 1 sala física (consistente con CP-SAT)
         for a in range(len(idxs)):
             for b in range(a + 1, len(idxs)):
                 ri, rj = idxs[a], idxs[b]
-                if sec_by_id[reps_list[ri]].codigo_curso == sec_by_id[reps_list[rj]].codigo_curso:
-                    continue
-                _add(ri, rj)
+                mismo_curso = (
+                    sec_by_id[reps_list[ri]].codigo_curso
+                    == sec_by_id[reps_list[rj]].codigo_curso
+                )
+                if capacidad == 1:
+                    _add(ri, rj)            # 1 sala física: nunca pueden coincidir
+                elif not mismo_curso:
+                    _add(ri, rj)            # cap>1: solo cursos distintos (aprox. binaria)
 
     # Histórico por rep
     historico_rep: list[set[int]] = []
@@ -323,14 +360,18 @@ def calcular_fitness(individuo: list[list[int]], ctx: GAContexto) -> tuple[float
                 penalty += PESOS["RB2"]
                 break  # penalizar el rep una sola vez
 
-    # RB3: Distintos componentes del mismo curso → días distintos
+    # RB3: Distintos componentes del mismo curso → días distintos.
+    # comp_map = {comp_str: [rep_idx, ...]}. Penalizar días compartidos entre cada
+    # par de reps de componentes DISTINTOS (cada sección LABT cuenta por separado).
     for comp_map in ctx.reps_por_curso.values():
-        comp_idxs = list(comp_map.values())
-        for a in range(len(comp_idxs)):
-            for b in range(a + 1, len(comp_idxs)):
-                dias_a = {_DIA_DEL_BLOQUE[bk] for bk in individuo[comp_idxs[a]]}
-                dias_b = {_DIA_DEL_BLOQUE[bk] for bk in individuo[comp_idxs[b]]}
-                penalty += len(dias_a & dias_b) * PESOS["RB3"]
+        comps = list(comp_map.keys())
+        for a in range(len(comps)):
+            for b in range(a + 1, len(comps)):
+                for ri in comp_map[comps[a]]:
+                    for rj in comp_map[comps[b]]:
+                        dias_a = {_DIA_DEL_BLOQUE[bk] for bk in individuo[ri]}
+                        dias_b = {_DIA_DEL_BLOQUE[bk] for bk in individuo[rj]}
+                        penalty += len(dias_a & dias_b) * PESOS["RB3"]
 
     # RB4: Máximo 1 bloque del mismo componente por curso por día
     for i in range(len(ctx.reps)):
@@ -350,6 +391,12 @@ def calcular_fitness(individuo: list[list[int]], ctx: GAContexto) -> tuple[float
         for b in individuo[i]:
             if b not in hist:
                 penalty += PESOS["RB5"]
+
+    # Preferencia por la grilla estándar: penalizar cada bloque helper usado.
+    for i in range(len(ctx.reps)):
+        for b in individuo[i]:
+            if b not in SET_ESTANDAR:
+                penalty += PESO_BLOQUE_HELPER
 
     return (penalty,)
 

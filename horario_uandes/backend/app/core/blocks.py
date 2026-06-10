@@ -23,19 +23,39 @@ _SUB_INICIO_MIN = [_min(t) for t in [
     "13:30", "14:30", "15:30", "16:30", "17:30", "18:30",
 ]]
 
-# Definición de bloques: (hora_inicio, hora_fin, tipo)
-# Hay pausa de almuerzo 12:30–13:20; el bloque de tarde empieza en 13:30.
-# No existe ningún bloque de 2h que empiece a las 12:30 o 14:30.
-_BLOQUES_DEF: list[tuple[str, str, str]] = [
-    # 5 bloques de 2h
-    ("8:30",  "10:20", "2h"),
-    ("10:30", "12:20", "2h"),
-    ("13:30", "15:20", "2h"),   # primer bloque de tarde, tras el almuerzo
-    ("15:30", "17:20", "2h"),
-    ("17:30", "19:20", "2h"),
-    # 2 bloques de 3h (cruzan el horario de almuerzo)
-    ("10:30", "13:20", "3h"),   # sub-bloques: 10:30, 11:30, 12:30
-    ("12:30", "15:20", "3h"),   # sub-bloques: 12:30, 13:30, 14:30
+# Definición de bloques: (hora_inicio, hora_fin, tipo, es_estandar)
+#
+# Bloques ESTÁNDAR: la grilla institucional preferida. Las clases deberían caer
+# aquí salvo que la disponibilidad del profesor obligue a usar un bloque "helper".
+#
+# Bloques HELPER (es_estandar=False): rellenan los huecos del catálogo estándar
+# para que cualquier disponibilidad declarada en sub-bloques de 50 min sea
+# representable. El solver los usa solo como último recurso (ver objetivo en
+# solver_cpsat: minimizar uso de bloques no estándar).
+_BLOQUES_DEF: list[tuple[str, str, str, bool]] = [
+    # ── 5 bloques de 2h ESTÁNDAR ──
+    ("8:30",  "10:20", "2h", True),
+    ("10:30", "12:20", "2h", True),
+    ("13:30", "15:20", "2h", True),   # primer bloque de tarde, tras el almuerzo
+    ("15:30", "17:20", "2h", True),
+    ("17:30", "19:20", "2h", True),
+    # ── 2 bloques de 3h ESTÁNDAR (cruzan el horario de almuerzo) ──
+    ("10:30", "13:20", "3h", True),   # sub-bloques: 10:30, 11:30, 12:30
+    ("12:30", "15:20", "3h", True),   # sub-bloques: 12:30, 13:30, 14:30
+    # ── bloques de 2h HELPER (rellenan los inicios 9:30, 11:30, 12:30, 14:30, 16:30) ──
+    ("9:30",  "11:20", "2h", False),
+    ("11:30", "13:20", "2h", False),
+    ("12:30", "14:20", "2h", False),
+    ("14:30", "16:20", "2h", False),
+    ("16:30", "18:20", "2h", False),
+    # ── bloques de 3h HELPER (mañana temprano, tarde y noche) ──
+    ("8:30",  "11:20", "3h", False),
+    ("9:30",  "12:20", "3h", False),
+    ("11:30", "14:20", "3h", False),
+    ("13:30", "16:20", "3h", False),
+    ("14:30", "17:20", "3h", False),
+    ("15:30", "18:20", "3h", False),
+    ("16:30", "19:20", "3h", False),   # el caso del profesor disponible solo en la tarde
 ]
 
 BLOQUES_2H = [d for d in _BLOQUES_DEF if d[2] == "2h"]
@@ -64,20 +84,22 @@ class BloqueHorario:
     hora_fin: str
     tipo: str                        # "2h" o "3h"
     sub_bloques: frozenset[int]      # minutos de inicio de cada sub-bloque contenido
+    es_estandar: bool = True         # True = grilla institucional preferida; False = helper
 
     def es_3h(self) -> bool:
         return self.tipo == "3h"
 
     def __repr__(self) -> str:
-        return f"BloqueHorario({self.dia.value} {self.hora_inicio}-{self.hora_fin})"
+        marca = "" if self.es_estandar else " (helper)"
+        return f"BloqueHorario({self.dia.value} {self.hora_inicio}-{self.hora_fin}{marca})"
 
 
 def generar_bloques_horarios() -> list[BloqueHorario]:
-    """Genera los 35 bloques horarios (7 slots × 5 días)."""
+    """Genera todos los bloques horarios (slots × 5 días), estándar + helper."""
     bloques: list[BloqueHorario] = []
     idx = 0
     for dia in Dia:
-        for ini, fin, tipo in _BLOQUES_DEF:
+        for ini, fin, tipo, es_std in _BLOQUES_DEF:
             bloques.append(BloqueHorario(
                 idx=idx,
                 dia=dia,
@@ -85,6 +107,7 @@ def generar_bloques_horarios() -> list[BloqueHorario]:
                 hora_fin=fin,
                 tipo=tipo,
                 sub_bloques=_sub_bloques_de(ini, fin),
+                es_estandar=es_std,
             ))
             idx += 1
     return bloques
@@ -100,6 +123,11 @@ def bloques_se_solapan(b1: BloqueHorario, b2: BloqueHorario) -> bool:
 # Pre-computados al importar el módulo
 TODOS_BLOQUES: list[BloqueHorario] = generar_bloques_horarios()
 N_BLOQUES = len(TODOS_BLOQUES)
+
+# Índices de bloques estándar y helper (para preferir los estándar en el solver)
+BLOQUES_ESTANDAR: list[int] = [i for i, b in enumerate(TODOS_BLOQUES) if b.es_estandar]
+BLOQUES_HELPER:   list[int] = [i for i, b in enumerate(TODOS_BLOQUES) if not b.es_estandar]
+SET_ESTANDAR: frozenset[int] = frozenset(BLOQUES_ESTANDAR)
 
 # Matriz de solapamiento [i][j] = True si TODOS_BLOQUES[i] solapa con TODOS_BLOQUES[j]
 MATRIZ_SOLAPAMIENTO: list[list[bool]] = [

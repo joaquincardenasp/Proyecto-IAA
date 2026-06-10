@@ -29,6 +29,9 @@ class Profesor:
     rut: str
     nombre: str
     tipo: TipoProfesor
+    # Índices de bloques donde el profesor está disponible (de TODOS_BLOQUES).
+    # Set vacío = disponibilidad total (no hay datos o los campos del Maestro estaban vacíos).
+    disponibilidad: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -63,6 +66,10 @@ class Seccion:
 
 @dataclass
 class DatosProblema:
-    cursos: dict[str, Curso] = field(default_factory=dict)        # codigo → Curso
+    cursos: dict[str, Curso] = field(default_factory=dict)         # codigo → Curso
     secciones: list[Seccion] = field(default_factory=list)
     profesores: dict[str, Profesor] = field(default_factory=dict)  # rut → Profesor
+    # sala_name → cantidad de salas físicas de ese tipo
+    # sala_name = el NOMBRE que aparece en Curso.sala_especial (parte antes de " EN HORARIO DE ")
+    # Ej: {"LABT COMPUTACION": 4, "LABT ELECTRICA": 1, "SALA CON ENCHUFE INDIVIDUAL": 8}
+    capacidad_por_sala: dict[str, int] = field(default_factory=dict)
