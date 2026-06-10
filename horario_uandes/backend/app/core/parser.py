@@ -1,10 +1,12 @@
 """
 Parser — lee Maestro_XXXXXX.xlsx y SALAS_ESPECIALES_ING.xlsx y construye DatosProblema.
 
-Fuentes:
+Fuentes (ver README.md §1 para el detalle completo):
   Maestro_XXXXXX.xlsx
-    Hoja MAESTRO   → secciones a programar (filas con CURSO MANDANTE = "SI")
-    Hoja PROFESORES → RUTs de profesores de jornada completa
+    Hoja MAESTRO    → secciones a programar (filas con CURSO MANDANTE = "SI")
+    Hoja PROFESORES → RUTs de profesores JORNADA (disponibilidad total)
+    Hoja RESPUESTAS → disponibilidad de honorarios (formulario Google)
+    Hoja DisponibilidadesFueraForms → honorarios sin formulario (carga manual)
 
   SALAS_ESPECIALES_ING.xlsx
     Hoja BBDD           → mapeo curso → sala especial
@@ -13,27 +15,23 @@ Fuentes:
 Columnas del MAESTRO buscadas por nombre (no por posición):
   CURSO MANDANTE      → filtro principal
   PLAN DE ESTUDIO     → plan al que pertenece la fila
-  CODIGO              → código del curso
-  TITULO              → nombre del curso
-  SECCIONES           → número/letra de sección
+  CODIGO / TITULO / SECCIONES
   Plan Común          → semestre en plan común (prioridad sobre carreras)
   ICI / IOC / ICE / ICC / ICA → semestre por carrera (si Plan Común vacío)
-  Clases A PROGRAMAR  → horas semanales de cátedra a programar
-  Ayudantías PROGRAMAR / Ayudantías A PROGRAMAR → horas de ayudantía
-  Laboratorios o Talleres PROGRAMAR              → horas de lab
-  RUT PROFESOR 1 / NOMBRE PROFESOR 1             → profesor de cátedra
-  RUT PROFESOR 2 / NOMBRE PROFESOR 2             → segundo profesor (~6 casos)
-  RUT PROFESOR LABT / PROFESOR LABT              → profesor de laboratorio
+  Clases A PROGRAMAR / Ayudantías PROGRAMAR / Laboratorios o Talleres PROGRAMAR → horas
+  RUT PROFESOR 1 / RUT PROFESOR 2 / RUT PROFESOR LABT → profesores
   2+1 o 3?            → distribución de bloques de CLAS
-  LUNES / MARTES / MIERCOLES / JUEVES / VIERNES  → disponibilidad (versión MAYÚSCULAS)
-    Las columnas en minúsculas/título (horario ya asignado) se ignoran.
+
+IMPORTANTE: las columnas LUNES-VIERNES del Maestro NO se usan para disponibilidad
+(no son confiables). La disponibilidad sale de PROFESORES + RESPUESTAS + FueraForms.
 
 Diseño:
   - Un mismo CODIGO puede aparecer en múltiples filas (distintos PLAN DE ESTUDIO).
     → Los semestres de cada plan se ACUMULAN (unión de sets).
     → Las secciones se crean solo una vez por (CODIGO, SECCIONES, componente).
-  - afecta_disponibilidad: True solo si hay RUT de profesor; False para AYUD siempre.
-  - "2+1" se trata como 2h en v1 (simplificación documentada).
+  - afecta_disponibilidad: True solo si hay RUT de profesor real; False para AYUD
+    siempre y para LABT sin profesor de lab propio (lo dicta un TA).
+  - "2+1" se trata como 2h (simplificación documentada).
 """
 from __future__ import annotations
 
@@ -46,6 +44,7 @@ from typing import Optional
 
 import pandas as pd
 
+from .blocks import TODOS_BLOQUES
 from .models import Curso, DatosProblema, Profesor, Seccion, TipoProfesor, TipoReunion
 
 warnings.filterwarnings("ignore")
@@ -74,6 +73,19 @@ def _norm(s: str) -> str:
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
 
 
+def _canon_sala(nombre: str) -> str:
+    """
+    Forma canónica de un nombre de sala, para conciliar la hoja BBDD (curso → sala)
+    con la hoja SALAS ESPECIALES (tipo → capacidad), que usan nombres distintos.
+
+    Ej: 'LABORATORIO DE COMPUTACION' y 'LABT COMPUTACION' → ambos 'LABT COMPUTACION'.
+    """
+    s = unicodedata.normalize("NFKD", str(nombre).upper()).encode("ascii", "ignore").decode()
+    s = s.replace("LABORATORIO", "LABT")
+    tokens = [t for t in s.split() if t not in ("DE", "DEL")]
+    return " ".join(tokens).strip()
+
+
 def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
     """
     Construye {campo_logico: nombre_real_columna_en_df} buscando por nombre normalizado.
@@ -99,34 +111,6 @@ def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
                 if cn == pat:
                     return col
         # Fase 2: coincidencia parcial (el patrón está contenido)
-        for pat in pats:
-            for col, cn in col_norm.items():
-                if pat in cn:
-                    return col
-        return None
-
-    def buscar_mayuscula(*patrones: str) -> Optional[str]:
-        """
-        Como buscar(), pero prioriza columnas cuyos nombre original sea todo MAYÚSCULAS.
-        Esto distingue "LUNES" (disponibilidad a programar) de "Lunes" (ya asignado).
-        """
-        pats = [_norm(p) for p in patrones]
-        # Fase 1: exacta + todo-mayúsculas
-        for pat in pats:
-            for col, cn in col_norm.items():
-                if cn == pat and str(col).strip().isupper():
-                    return col
-        # Fase 2: exacta (cualquier capitalización)
-        for pat in pats:
-            for col, cn in col_norm.items():
-                if cn == pat:
-                    return col
-        # Fase 3: parcial + todo-mayúsculas
-        for pat in pats:
-            for col, cn in col_norm.items():
-                if pat in cn and str(col).strip().isupper():
-                    return col
-        # Fase 4: parcial (cualquier capitalización)
         for pat in pats:
             for col, cn in col_norm.items():
                 if pat in cn:
@@ -163,12 +147,8 @@ def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
         "NOMBRE_LABT":  buscar("nombre profesor labt", "profesor labt"),
         # Distribución de bloques
         "DISTRIBUCION": buscar("2+1 o 3?", "2+1 o 3"),
-        # Disponibilidad (versión MAYÚSCULAS = a programar; minúsculas = ya asignado → ignorar)
-        "LUNES_DISP":   buscar_mayuscula("lunes"),
-        "MARTES_DISP":  buscar_mayuscula("martes"),
-        "MIERC_DISP":   buscar_mayuscula("miercoles"),
-        "JUEVES_DISP":  buscar_mayuscula("jueves"),
-        "VIERNES_DISP": buscar_mayuscula("viernes"),
+        # NOTA: las columnas LUNES-VIERNES del Maestro NO se mapean aquí: la disponibilidad
+        # se lee de las hojas PROFESORES / RESPUESTAS / DisponibilidadesFueraForms.
     }
 
 
@@ -253,7 +233,19 @@ def _parse_horas(val) -> int:
 
 
 def _normalizar_rut(val) -> str:
-    """RUT limpio: sin puntos ni espacios. Retorna '' si está vacío o es NaN."""
+    """
+    RUT limpio: sin puntos ni espacios. Retorna '' si está vacío o es NaN.
+    Maneja RUTs numéricos (int/float, ej. de la hoja RESPUESTAS) y con dígito K.
+    """
+    if val is None:
+        return ""
+    if isinstance(val, float):
+        if math.isnan(val):
+            return ""
+        if val.is_integer():
+            return str(int(val))
+    if isinstance(val, int):
+        return str(val)
     s = _str(val)
     return "" if not s else s.replace(".", "").replace(" ", "")
 
@@ -277,6 +269,131 @@ def _normalizar_seccion_id(val) -> str:
         return str(int(float(s)))
     except (ValueError, TypeError):
         return s
+
+
+# ---------------------------------------------------------------------------
+# Disponibilidad de profesores (hojas RESPUESTAS / DisponibilidadesFueraForms)
+# ---------------------------------------------------------------------------
+
+def _parse_subblocks_disp(val) -> set[int]:
+    """
+    Parsea '8:30-9:20,9:30-10:20,...' → set de minutos de inicio de sub-bloques.
+    Solo usa el extremo izquierdo de cada rango (la hora de inicio del sub-bloque).
+    """
+    s = _str(val)
+    if not s:
+        return set()
+    mins: set[int] = set()
+    for parte in s.split(","):
+        inicio = parte.strip().split("-")[0].strip()
+        if ":" in inicio:
+            try:
+                h, m = inicio.split(":", 1)
+                mins.add(int(h) * 60 + int(m))
+            except ValueError:
+                pass
+    return mins
+
+
+def _subblocks_a_bloques(disp_por_dia: dict[str, set[int]]) -> set[int]:
+    """
+    Convierte la disponibilidad por día (dia→{minutos de sub-bloques}) en
+    el conjunto de índices de TODOS_BLOQUES que el profesor puede usar.
+
+    Un bloque es disponible si TODOS sus sub-bloques (frozenset[int] en minutos)
+    están dentro de los sub-bloques disponibles para ese día.
+
+    Si no hay datos → set vacío (se interpreta como disponibilidad total).
+    """
+    if not any(disp_por_dia.values()):
+        return set()
+
+    disponibles: set[int] = set()
+    for i, bloque in enumerate(TODOS_BLOQUES):
+        dia = bloque.dia.value   # "L" | "M" | "X" | "J" | "V"
+        mins_disp = disp_por_dia.get(dia, set())
+        if not mins_disp:
+            continue  # sin disponibilidad ese día → bloque no disponible
+        if bloque.sub_bloques.issubset(mins_disp):
+            disponibles.add(i)
+    return disponibles
+
+
+# ---------------------------------------------------------------------------
+# Disponibilidad real: hojas RESPUESTAS y DisponibilidadesFueraForms
+# ---------------------------------------------------------------------------
+
+# Día en español (normalizado, sin acentos) → código de Dia
+_DIA_NOMBRE: dict[str, str] = {
+    "lunes": "L", "martes": "M", "miercoles": "X", "jueves": "J", "viernes": "V",
+}
+
+
+def _leer_respuestas(xl: pd.ExcelFile) -> dict[str, set[int]]:
+    """
+    Lee la hoja RESPUESTAS (formulario Google de disponibilidad de honorarios).
+    Formato: columnas [timestamp, nombre, RUT, día, franja]; una fila por
+    (profesor, día, franja de 50 min). La 1a fila ya es dato (sin encabezado).
+
+    Retorna {rut: set[bloque_idx]}.
+    """
+    try:
+        df = xl.parse("RESPUESTAS", header=None)
+    except Exception as e:
+        print(f"[AVISO] No se pudo leer hoja RESPUESTAS: {e}")
+        return {}
+
+    por_rut: dict[str, dict[str, set[int]]] = {}
+    for _, row in df.iterrows():
+        if len(row) < 5:
+            continue
+        rut = _normalizar_rut(row.iloc[2])
+        dia = _DIA_NOMBRE.get(_norm(_str(row.iloc[3])))
+        if not rut or not dia:
+            continue
+        mins = _parse_subblocks_disp(_str(row.iloc[4]))
+        if mins:
+            por_rut.setdefault(rut, {}).setdefault(dia, set()).update(mins)
+
+    return {rut: _subblocks_a_bloques(dd) for rut, dd in por_rut.items()}
+
+
+def _leer_disp_fuera(xl: pd.ExcelFile) -> dict[str, set[int]]:
+    """
+    Lee la hoja DisponibilidadesFueraForms (honorarios que no llenaron el formulario,
+    cargados a mano). Formato irregular en 2 columnas:
+        RUT        NOMBRE                       ← inicia un profesor
+        DIA        franja1,franja2,...          ← un día de ese profesor
+        ...
+        (fila vacía separa profesores)
+
+    Retorna {rut: set[bloque_idx]}.
+    """
+    try:
+        df = xl.parse("DisponibilidadesFueraForms", header=None)
+    except Exception as e:
+        print(f"[AVISO] No se pudo leer hoja DisponibilidadesFueraForms: {e}")
+        return {}
+
+    por_rut: dict[str, dict[str, set[int]]] = {}
+    actual: Optional[str] = None
+    for _, row in df.iterrows():
+        c0 = row.iloc[0] if len(row) > 0 else None
+        c1 = row.iloc[1] if len(row) > 1 else None
+        s0 = _str(c0)
+        if not s0:
+            continue
+        dia = _DIA_NOMBRE.get(_norm(s0))
+        if dia:
+            if actual:
+                mins = _parse_subblocks_disp(_str(c1))
+                if mins:
+                    por_rut.setdefault(actual, {}).setdefault(dia, set()).update(mins)
+        else:
+            # No es un día → es el RUT de un profesor nuevo
+            actual = _normalizar_rut(c0)
+
+    return {rut: _subblocks_a_bloques(dd) for rut, dd in por_rut.items() if rut}
 
 
 def _calcular_bloques_clas(horas: int, distribucion: str) -> int:
@@ -360,6 +477,7 @@ def _leer_salas_especiales(
                 if not nombre or contexto in ("PRUEBA", "AYUDANTIA"):
                     continue
 
+                nombre = _canon_sala(nombre)
                 # LABT tiene prioridad sobre CLASE
                 if codigo not in sala_por_curso or contexto == "LABORATORIO":
                     sala_por_curso[codigo] = nombre
@@ -375,7 +493,7 @@ def _leer_salas_especiales(
         )
         if tipo_col:
             for val in df_salas[tipo_col]:
-                tipo = _str(val)
+                tipo = _canon_sala(_str(val))
                 if tipo:
                     capacidad_por_tipo[tipo] = capacidad_por_tipo.get(tipo, 0) + 1
     except Exception as e:
@@ -511,6 +629,11 @@ def _leer_maestro(
                 )
                 profesores[rut] = Profesor(rut=rut, nombre=nombre, tipo=tipo)
 
+        # NOTA: la disponibilidad NO se lee de las columnas LUNES-VIERNES del Maestro
+        # (no son confiables: no coinciden con el formulario real). Se asigna después,
+        # en cargar_datos, desde las hojas RESPUESTAS / DisponibilidadesFueraForms
+        # (honorarios) y asumiendo disponibilidad total para los JORNADA.
+
         # ── Crear / actualizar Curso ──────────────────────────────────────
         if codigo not in cursos:
             cursos[codigo] = Curso(
@@ -566,14 +689,22 @@ def _leer_maestro(
             sec_id = f"{sec_base}-LABT"
             if sec_id not in sec_ids_creados:
                 sec_ids_creados.add(sec_id)
-                prof_lab = rut_labt if rut_labt else rut1
+                if rut_labt:
+                    # Hay profesor de laboratorio explícito → afecta su disponibilidad
+                    prof_lab       = rut_labt
+                    afecta_lab     = True
+                else:
+                    # Sin profesor de lab → lo dicta un TA (igual que AYUD)
+                    # Guardamos rut1 solo como referencia/display, no como restricción
+                    prof_lab       = rut1
+                    afecta_lab     = False
                 secciones.append(Seccion(
                     id=sec_id,
                     codigo_curso=codigo,
                     seccion=seccion_id,
                     componente=TipoReunion.LABT,
                     rut_profesor=prof_lab,
-                    afecta_disponibilidad=bool(prof_lab),
+                    afecta_disponibilidad=afecta_lab,
                     cantidad_bloques_necesarios=_calcular_bloques(lab_h),
                 ))
 
@@ -633,12 +764,43 @@ def cargar_datos(inputs_dir: str | Path) -> DatosProblema:
 
     _leer_maestro(df_maestro, cols, cursos, secciones, profesores, ruts_jornada)
 
+    # ── Disponibilidad de profesores (fuente confiable) ───────────────────────
+    #   JORNADA  → disponibilidad TOTAL (set vacío = sin restricción RD2)
+    #   HONORARIO → desde el formulario (RESPUESTAS) o carga manual (FueraForms)
+    # Las columnas LUNES-VIERNES del Maestro NO se usan (no son confiables).
+    disp_respuestas = _leer_respuestas(xl)
+    disp_fuera      = _leer_disp_fuera(xl)
+    print(f"Disponibilidad: RESPUESTAS={len(disp_respuestas)} profes, "
+          f"FueraForms={len(disp_fuera)} profes")
+
+    honorarios_sin_disp: list[str] = []
+    for rut, prof in profesores.items():
+        if prof.tipo == TipoProfesor.JORNADA:
+            prof.disponibilidad = set()        # total
+            continue
+        bloques = disp_respuestas.get(rut) or disp_fuera.get(rut)
+        if bloques:
+            prof.disponibilidad = set(bloques)
+        else:
+            prof.disponibilidad = set()        # sin datos → asumir total (no sobre-restringir)
+            honorarios_sin_disp.append(rut)
+    if honorarios_sin_disp:
+        print(f"[AVISO] {len(honorarios_sin_disp)} honorario(s) sin disponibilidad "
+              f"en RESPUESTAS/FueraForms → se asume disponibilidad total")
+
     # Aplicar salas especiales
     for codigo, sala in sala_por_curso.items():
         if codigo in cursos:
             cursos[codigo].sala_especial = sala
 
-    datos = DatosProblema(cursos=cursos, secciones=secciones, profesores=profesores)
+    datos = DatosProblema(
+        cursos=cursos,
+        secciones=secciones,
+        profesores=profesores,
+        # sala_name = NOMBRE en BBDD (parte antes de " EN HORARIO DE ")
+        # se asume igual al TIPO en hoja SALAS ESPECIALES → cuenta de salas físicas
+        capacidad_por_sala=capacidad_por_tipo,
+    )
     _imprimir_resumen(datos, capacidad_por_tipo)
     return datos
 
@@ -680,6 +842,20 @@ def _imprimir_resumen(
     print(f"\nProfesores únicos: {len(profesores)}")
     for tipo, n in sorted(por_tipo.items()):
         print(f"  {tipo}: {n}")
+
+    # Disponibilidad (RD2): cuántos profesores tienen datos y cobertura promedio
+    con_disp = [p for p in profesores.values() if p.disponibilidad]
+    print(f"\nProfesores con disponibilidad declarada (RD2): {len(con_disp)}/{len(profesores)}")
+    if con_disp:
+        from .blocks import N_BLOQUES
+        prom = sum(len(p.disponibilidad) for p in con_disp) / len(con_disp)
+        print(f"  Bloques disponibles en promedio: {prom:.1f} de {N_BLOQUES}")
+        # Profesores con muy poca disponibilidad (posible causa de INFEASIBLE)
+        criticos = [p for p in con_disp if len(p.disponibilidad) < 4]
+        if criticos:
+            print(f"  [AVISO] {len(criticos)} profesor(es) con <4 bloques disponibles:")
+            for p in criticos[:8]:
+                print(f"    {p.nombre or p.rut}: {len(p.disponibilidad)} bloque(s)")
 
     multi = [s for s in secciones if s.cantidad_bloques_necesarios > 1]
     print(f"\nSecciones con múltiples bloques: {len(multi)}")

@@ -41,14 +41,19 @@ def check(cond: bool, msg: str) -> None:
 def test_blocks() -> None:
     print("\n--- test_blocks ---")
 
-    check(N_BLOQUES == 35, f"35 bloques totales (hay {N_BLOQUES})")
+    # Catálogo ampliado: 7 bloques estándar + 12 helper = 19 tipos × 5 días = 95
+    check(N_BLOQUES == 95, f"95 bloques totales (hay {N_BLOQUES})")
 
-    b3h = [b for b in TODOS_BLOQUES if b.tipo == "3h"]
-    check(len(b3h) == 10, f"10 bloques de 3h (hay {len(b3h)})")
-    for b in b3h:
+    estandar = [b for b in TODOS_BLOQUES if b.es_estandar]
+    check(len(estandar) == 35, f"35 bloques estándar (7 tipos × 5 días) (hay {len(estandar)})")
+
+    # Los bloques 3h ESTÁNDAR inician en 10:30 o 12:30; los helper rellenan otros inicios
+    b3h_std = [b for b in TODOS_BLOQUES if b.tipo == "3h" and b.es_estandar]
+    check(len(b3h_std) == 10, f"10 bloques 3h estándar (hay {len(b3h_std)})")
+    for b in b3h_std:
         check(
             b.hora_inicio in ("10:30", "12:30"),
-            f"bloque 3h inicia en 10:30 o 12:30 (es {b.hora_inicio})",
+            f"bloque 3h estándar inicia en 10:30 o 12:30 (es {b.hora_inicio})",
         )
 
     lunes = [b for b in TODOS_BLOQUES if b.dia.value == "L"]
@@ -155,17 +160,33 @@ def test_invariantes_secciones(datos) -> None:
         f"(hay {len(ayud_mal)} en True)",
     )
 
-    # CLAS/LABT con rut_profesor tienen afecta_disponibilidad=True
-    clas_labt_con_prof = [
+    # CLAS con profesor → afecta_disponibilidad=True (la cátedra la dicta el profesor)
+    clas_con_prof = [
         s for s in secciones
-        if s.componente != TipoReunion.AYUD and s.rut_profesor
+        if s.componente == TipoReunion.CLAS and s.rut_profesor
     ]
-    mal_afecta = [s for s in clas_labt_con_prof if not s.afecta_disponibilidad]
+    clas_mal = [s for s in clas_con_prof if not s.afecta_disponibilidad]
     check(
-        len(mal_afecta) == 0,
-        f"Todas las CLAS/LABT con profesor tienen afecta_disponibilidad=True "
-        f"(hay {len(mal_afecta)} en False)",
+        len(clas_mal) == 0,
+        f"Todas las CLAS con profesor tienen afecta_disponibilidad=True "
+        f"(hay {len(clas_mal)} en False)",
     )
+
+    # LABT: afecta_disponibilidad=True solo si hay profesor de laboratorio dedicado.
+    # Las LABT dictadas por un TA (sin RUT PROFESOR LABT) tienen afecta=False aunque
+    # rut_profesor conserve el profesor de cátedra como referencia de display.
+    # Invariante verificable: afecta=True ⇒ existe un rut_profesor.
+    afecta_sin_prof = [s for s in secciones if s.afecta_disponibilidad and not s.rut_profesor]
+    check(
+        len(afecta_sin_prof) == 0,
+        f"Toda sección con afecta_disponibilidad=True tiene profesor asignado "
+        f"(hay {len(afecta_sin_prof)} sin profesor)",
+    )
+
+    # Informativo: cuántas LABT son dictadas por TA (afecta=False)
+    labt_ta = [s for s in secciones
+               if s.componente == TipoReunion.LABT and not s.afecta_disponibilidad]
+    print(f"  LABT dictadas por TA (afecta_disponibilidad=False): {len(labt_ta)}")
 
     # Todas las secciones tienen >= 1 bloque
     check(

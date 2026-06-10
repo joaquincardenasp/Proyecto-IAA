@@ -257,6 +257,7 @@ export default function App() {
           <MetricasPanel
             metricas={results.metricas}
             secciones={results.secciones}
+            reporte={results.reporte}
           />
         )}
       </main>

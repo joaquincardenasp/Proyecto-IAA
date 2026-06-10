@@ -98,13 +98,16 @@ def desglose_fitness(individuo: list[list[int]], ctx: GAContexto) -> dict[str, f
                 break  # penalizar el rep solo una vez
 
     # RB3: Distintos componentes del mismo curso deben ir en días distintos
+    # comp_map = {comp_str: [rep_idx, ...]} — cada sección LABT es un rep separado.
     for comp_map in ctx.reps_por_curso.values():
-        comp_idxs = list(comp_map.values())
-        for a in range(len(comp_idxs)):
-            for b in range(a + 1, len(comp_idxs)):
-                dias_a = {_DIA_DEL_BLOQUE[bk] for bk in individuo[comp_idxs[a]]}
-                dias_b = {_DIA_DEL_BLOQUE[bk] for bk in individuo[comp_idxs[b]]}
-                rb["RB3"] += len(dias_a & dias_b) * PESOS["RB3"]
+        comps = list(comp_map.keys())
+        for a in range(len(comps)):
+            for b in range(a + 1, len(comps)):
+                for ri in comp_map[comps[a]]:
+                    for rj in comp_map[comps[b]]:
+                        dias_a = {_DIA_DEL_BLOQUE[bk] for bk in individuo[ri]}
+                        dias_b = {_DIA_DEL_BLOQUE[bk] for bk in individuo[rj]}
+                        rb["RB3"] += len(dias_a & dias_b) * PESOS["RB3"]
 
     # RB4: Máximo 1 bloque del mismo componente por día
     for i in range(len(ctx.reps)):
