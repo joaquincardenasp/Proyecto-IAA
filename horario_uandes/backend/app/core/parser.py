@@ -1,10 +1,12 @@
 """
 Parser — lee Maestro_XXXXXX.xlsx y SALAS_ESPECIALES_ING.xlsx y construye DatosProblema.
 
-Fuentes:
+Fuentes (ver README.md §1 para el detalle completo):
   Maestro_XXXXXX.xlsx
-    Hoja MAESTRO   → secciones a programar (filas con CURSO MANDANTE = "SI")
-    Hoja PROFESORES → RUTs de profesores de jornada completa
+    Hoja MAESTRO    → secciones a programar (filas con CURSO MANDANTE = "SI")
+    Hoja PROFESORES → RUTs de profesores JORNADA (disponibilidad total)
+    Hoja RESPUESTAS → disponibilidad de honorarios (formulario Google)
+    Hoja DisponibilidadesFueraForms → honorarios sin formulario (carga manual)
 
   SALAS_ESPECIALES_ING.xlsx
     Hoja BBDD           → mapeo curso → sala especial
@@ -13,27 +15,23 @@ Fuentes:
 Columnas del MAESTRO buscadas por nombre (no por posición):
   CURSO MANDANTE      → filtro principal
   PLAN DE ESTUDIO     → plan al que pertenece la fila
-  CODIGO              → código del curso
-  TITULO              → nombre del curso
-  SECCIONES           → número/letra de sección
+  CODIGO / TITULO / SECCIONES
   Plan Común          → semestre en plan común (prioridad sobre carreras)
   ICI / IOC / ICE / ICC / ICA → semestre por carrera (si Plan Común vacío)
-  Clases A PROGRAMAR  → horas semanales de cátedra a programar
-  Ayudantías PROGRAMAR / Ayudantías A PROGRAMAR → horas de ayudantía
-  Laboratorios o Talleres PROGRAMAR              → horas de lab
-  RUT PROFESOR 1 / NOMBRE PROFESOR 1             → profesor de cátedra
-  RUT PROFESOR 2 / NOMBRE PROFESOR 2             → segundo profesor (~6 casos)
-  RUT PROFESOR LABT / PROFESOR LABT              → profesor de laboratorio
+  Clases A PROGRAMAR / Ayudantías PROGRAMAR / Laboratorios o Talleres PROGRAMAR → horas
+  RUT PROFESOR 1 / RUT PROFESOR 2 / RUT PROFESOR LABT → profesores
   2+1 o 3?            → distribución de bloques de CLAS
-  LUNES / MARTES / MIERCOLES / JUEVES / VIERNES  → disponibilidad (versión MAYÚSCULAS)
-    Las columnas en minúsculas/título (horario ya asignado) se ignoran.
+
+IMPORTANTE: las columnas LUNES-VIERNES del Maestro NO se usan para disponibilidad
+(no son confiables). La disponibilidad sale de PROFESORES + RESPUESTAS + FueraForms.
 
 Diseño:
   - Un mismo CODIGO puede aparecer en múltiples filas (distintos PLAN DE ESTUDIO).
     → Los semestres de cada plan se ACUMULAN (unión de sets).
     → Las secciones se crean solo una vez por (CODIGO, SECCIONES, componente).
-  - afecta_disponibilidad: True solo si hay RUT de profesor; False para AYUD siempre.
-  - "2+1" se trata como 2h en v1 (simplificación documentada).
+  - afecta_disponibilidad: True solo si hay RUT de profesor real; False para AYUD
+    siempre y para LABT sin profesor de lab propio (lo dicta un TA).
+  - "2+1" se trata como 2h (simplificación documentada).
 """
 from __future__ import annotations
 
@@ -119,34 +117,6 @@ def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
                     return col
         return None
 
-    def buscar_mayuscula(*patrones: str) -> Optional[str]:
-        """
-        Como buscar(), pero prioriza columnas cuyos nombre original sea todo MAYÚSCULAS.
-        Esto distingue "LUNES" (disponibilidad a programar) de "Lunes" (ya asignado).
-        """
-        pats = [_norm(p) for p in patrones]
-        # Fase 1: exacta + todo-mayúsculas
-        for pat in pats:
-            for col, cn in col_norm.items():
-                if cn == pat and str(col).strip().isupper():
-                    return col
-        # Fase 2: exacta (cualquier capitalización)
-        for pat in pats:
-            for col, cn in col_norm.items():
-                if cn == pat:
-                    return col
-        # Fase 3: parcial + todo-mayúsculas
-        for pat in pats:
-            for col, cn in col_norm.items():
-                if pat in cn and str(col).strip().isupper():
-                    return col
-        # Fase 4: parcial (cualquier capitalización)
-        for pat in pats:
-            for col, cn in col_norm.items():
-                if pat in cn:
-                    return col
-        return None
-
     return {
         # Filtro y metadata
         "MANDANTE":     buscar("curso mandante"),
@@ -177,12 +147,8 @@ def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
         "NOMBRE_LABT":  buscar("nombre profesor labt", "profesor labt"),
         # Distribución de bloques
         "DISTRIBUCION": buscar("2+1 o 3?", "2+1 o 3"),
-        # Disponibilidad (versión MAYÚSCULAS = a programar; minúsculas = ya asignado → ignorar)
-        "LUNES_DISP":   buscar_mayuscula("lunes"),
-        "MARTES_DISP":  buscar_mayuscula("martes"),
-        "MIERC_DISP":   buscar_mayuscula("miercoles"),
-        "JUEVES_DISP":  buscar_mayuscula("jueves"),
-        "VIERNES_DISP": buscar_mayuscula("viernes"),
+        # NOTA: las columnas LUNES-VIERNES del Maestro NO se mapean aquí: la disponibilidad
+        # se lee de las hojas PROFESORES / RESPUESTAS / DisponibilidadesFueraForms.
     }
 
 
@@ -306,18 +272,8 @@ def _normalizar_seccion_id(val) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Disponibilidad de profesores
+# Disponibilidad de profesores (hojas RESPUESTAS / DisponibilidadesFueraForms)
 # ---------------------------------------------------------------------------
-
-# Mapeo campo lógico → día normalizado (valor de Dia enum)
-_DISP_CAMPOS: list[tuple[str, str]] = [
-    ("LUNES_DISP",   "L"),
-    ("MARTES_DISP",  "M"),
-    ("MIERC_DISP",   "X"),
-    ("JUEVES_DISP",  "J"),
-    ("VIERNES_DISP", "V"),
-]
-
 
 def _parse_subblocks_disp(val) -> set[int]:
     """

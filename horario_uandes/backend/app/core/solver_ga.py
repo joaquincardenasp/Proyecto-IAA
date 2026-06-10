@@ -220,8 +220,8 @@ def construir_contexto(
     #   capacidad desconocida o > 1 → solo se conectan cursos distintos.
     # Nota: el grafo de conflictos es binario y no expresa "a lo más C secciones por
     # bloque". Para capacidad > 1 esto puede sub-restringir entre secciones del mismo
-    # curso; la factibilidad de capacidad la garantiza CP-SAT (punto de partida del GA)
-    # y el reporter señala cualquier exceso. Ver _agregar_rd4 en solver_cpsat.py.
+    # curso; la factibilidad de capacidad la garantiza CP-SAT (punto de partida del GA,
+    # que sí modela RD4 exacto por sub-bloque) y el reporter señala cualquier exceso.
     cap = datos.capacidad_por_sala
     por_sala: dict[str, list[int]] = defaultdict(list)
     for i, rep_id in enumerate(reps_list):

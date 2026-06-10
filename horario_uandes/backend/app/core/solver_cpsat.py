@@ -1,34 +1,40 @@
 """
 solver_cpsat.py — Fase 1: restricciones duras via CP-SAT.
 
-Implementación incremental (PRD §8):
-  Paso 2:  RD1 solo Plan Común + RC
-  Paso 3:  RD1 + ICI
-  Paso 4:  RD1 + IOC, ICE, ICC, ICA, ICQ
-  Paso 5:  Múltiples bloques por sección
-  Paso 6:  RD3, RD4, RD7, RD8 (ACTUAL)
+Modelo a NIVEL DE SECCIÓN. Cada sección tiene su(s) variable(s) de bloque, con dominio
+= sus bloques disponibles. El solver decide el paralelismo por sí mismo: para que todos
+los ramos de un semestre quepan sin topes (RD1 estricto entre cursos distintos), pone en
+paralelo las secciones de un mismo curso donde la disponibilidad lo permite. No se
+pre-agrupan secciones.
 
-RD1 — Sin topes mismo semestre/carrera:
-  Cursos DISTINTOS del mismo (carrera, semestre) no pueden tener bloques solapados.
+Restricciones duras (ver README.md §2 para el detalle completo):
 
-RC — Paralelismo de secciones del mismo curso:
-  1. Sincronización: todas las secciones CLAS van al mismo bloque. Ídem AYUD, LABT.
-  2. No solapamiento: ningún bloque de CLAS puede solapar con ningún bloque de AYUD/LABT.
+  RD2 — Disponibilidad de profesor:
+    Cada sección solo puede usar bloques donde su profesor está disponible. Implementada
+    como el DOMINIO de la variable (disponibilidad_seccion). JORNADA = grilla estándar
+    completa; HONORARIO = bloques declarados en el formulario. AYUD = grilla estándar
+    desde 12:30 (la dicta un TA).
 
-Intra-sección: bloques de la misma sección no pueden solaparse entre sí.
+  Intra-sección — los bloques de una misma sección no se solapan entre sí.
 
-RD3 — Unicidad de profesor:
-  Un profesor no puede dictar 2 secciones con afecta_disponibilidad=True simultáneamente.
+  NRC — dentro de una misma sección (CLAS-k/AYUD-k/LABT-k) los componentes no se solapan
+    (el alumno asiste a los tres).
 
-RD4 — Sala especial única:
-  Dos secciones con la misma sala especial no pueden coincidir.
+  RD1 — Sin topes de malla:
+    Secciones de cursos DISTINTOS del mismo (carrera, semestre) no se solapan. Las del
+    MISMO curso quedan exentas (pueden ir en paralelo).
 
-RD7 — Ayudantías desde 12:30:
-  Los bloques asignados a secciones AYUD deben iniciar a las 12:30 o después.
+  RD3 — Unicidad de profesor:
+    Un profesor con afecta_disponibilidad=True no dicta dos secciones a la vez, en
+    cualquier rol/curso (el profesor de laboratorio se trata aparte del de cátedra).
 
-RD8 — Prof lab/cátedra:
-  Si el prof de lab es el mismo que el de cátedra (mismo curso), no pueden coincidir.
-  Nota: ya cubierto completamente por RC. Se cuenta para documentar.
+  RD4 — Capacidad de salas especiales:
+    En cada sub-bloque, las secciones que usan un mismo tipo de sala no superan las salas
+    físicas. Capacidad 1 → pares no se solapan; capacidad N → a lo más N en paralelo.
+
+  RD7 — Ayudantías desde 12:30: garantizado por el dominio de las secciones AYUD.
+
+Objetivo: minimizar el uso de bloques helper (preferir la grilla institucional estándar).
 
 Solapamiento: verificado por sub-bloques (MATRIZ_SOLAPAMIENTO), NO por igualdad de índice.
 """
@@ -57,14 +63,15 @@ from .models import DatosProblema, TipoReunion
 class ResultadoSolver:
     asignaciones: dict[str, list[int]] = field(default_factory=dict)  # sec_id → [bloque_idx, ...]
     estado: str = "UNKNOWN"
+    # Conteos de restricciones agregadas al modelo (para diagnóstico).
     n_rd1: int = 0
-    n_rd2: int = 0
-    n_rc: int = 0
+    n_rd2: int = 0   # RD2 va en el dominio de cada variable, no como restricción aparte → 0
+    n_rc: int = 0    # NRC: componentes de la misma sección que no se solapan
     n_intra: int = 0
     n_rd3: int = 0
     n_rd4: int = 0
-    n_rd7: int = 0
-    n_rd8: int = 0   # siempre 0 (cubierto por RC), se mantiene para documentar
+    n_rd7: int = 0   # RD7 va en el dominio de las AYUD → 0
+    n_rd8: int = 0   # no usado en el modelo actual
 
 
 # ---------------------------------------------------------------------------
@@ -101,251 +108,6 @@ _BLOQUES_PROHIBIDOS_AYUD: list[int] = [
 
 
 # ---------------------------------------------------------------------------
-# Helper: RC
-# ---------------------------------------------------------------------------
-
-def _agregar_rc(
-    model: cp_model.CpModel,
-    x: dict[str, list[cp_model.IntVar]],
-    secciones: list,
-) -> int:
-    """
-    RC — Consistencia de secciones paralelas.
-
-    CLAS y AYUD: todas las secciones del mismo curso y componente van al MISMO bloque
-    (sincronización obligatoria — cada sección tiene distintos alumnos pero se dictan
-    simultáneamente, cada una en su propia sala de clase).
-
-    LABT: NO se sincronizan. Cada sección de laboratorio obtiene su propio bloque
-    independiente, porque:
-      (a) El número de salas físicas limita cuántas secciones pueden ser paralelas (RD4).
-      (b) Si el mismo profesor dicta varios labs, no pueden coincidir (RD3).
-    La restricción de que LABT no solape con CLAS SÍ se mantiene (para cada sección LABT
-    individualmente vs el bloque de CLAS del mismo curso).
-    """
-    grupos: dict[tuple, list] = defaultdict(list)
-    for s in secciones:
-        if s.id in x:
-            grupos[(s.codigo_curso, s.componente)].append(s)
-
-    codigos = {s.codigo_curso for s in secciones if s.id in x}
-    n = 0
-
-    for codigo in codigos:
-        # ── Sincronizar CLAS y AYUD ───────────────────────────────────────────
-        rep: dict[TipoReunion, list[cp_model.IntVar]] = {}
-
-        for comp in (TipoReunion.CLAS, TipoReunion.AYUD):
-            secs = grupos.get((codigo, comp), [])
-            if not secs:
-                continue
-            rep[comp] = x[secs[0].id]
-            for s in secs[1:]:
-                for k, var in enumerate(rep[comp]):
-                    model.Add(var == x[s.id][k])
-                    n += 1
-
-        # ── CLAS no puede solapar con AYUD ────────────────────────────────────
-        comp_list = list(rep.keys())
-        for i in range(len(comp_list)):
-            for j in range(i + 1, len(comp_list)):
-                for vi in rep[comp_list[i]]:
-                    for vj in rep[comp_list[j]]:
-                        model.AddForbiddenAssignments([vi, vj], _PARES_SOLAPAN)
-                        n += 1
-
-        # ── LABT: independiente, pero no puede solapar con CLAS ni AYUD ──────
-        labt_secs = grupos.get((codigo, TipoReunion.LABT), [])
-        for s_labt in labt_secs:
-            for comp_vars in rep.values():
-                for v_labt in x[s_labt.id]:
-                    for v_comp in comp_vars:
-                        model.AddForbiddenAssignments([v_labt, v_comp], _PARES_SOLAPAN)
-                        n += 1
-
-    return n
-
-
-# ---------------------------------------------------------------------------
-# Helper: RD2 — Disponibilidad de profesor
-# ---------------------------------------------------------------------------
-
-def _agregar_rd2(
-    model: cp_model.CpModel,
-    x: dict[str, list[cp_model.IntVar]],
-    secciones: list,
-    datos,          # DatosProblema
-) -> int:
-    """
-    RD2 — Disponibilidad de profesor: una sección con afecta_disponibilidad=True
-    solo puede asignarse a bloques en que el profesor está disponible.
-
-    La disponibilidad se lee de Profesor.disponibilidad (set[int] de índices de bloque).
-    Si el set está vacío → disponibilidad total asumida (sin restricción).
-    Solo aplica a secciones con afecta_disponibilidad=True.
-    """
-    n = 0
-    for s in secciones:
-        if not s.afecta_disponibilidad or s.id not in x:
-            continue
-        prof = datos.profesores.get(s.rut_profesor)
-        if not prof or not prof.disponibilidad:
-            continue  # sin datos → disponibilidad total
-        for var in x[s.id]:
-            for block_idx in range(N_BLOQUES):
-                if block_idx not in prof.disponibilidad:
-                    model.Add(var != block_idx)
-                    n += 1
-    return n
-
-
-# ---------------------------------------------------------------------------
-# Helper: RD3 — Unicidad de profesor
-# ---------------------------------------------------------------------------
-
-def _agregar_rd3(
-    model: cp_model.CpModel,
-    x: dict[str, list[cp_model.IntVar]],
-    secciones: list,
-) -> int:
-    """Un profesor no puede dictar 2 secciones con afecta_disponibilidad=True simultáneamente.
-
-    Excluye pares del MISMO curso: RC ya los maneja (secciones paralelas van al mismo
-    bloque intencionalmente; si el mismo prof dicta CLAS-1 y CLAS-2, es válido).
-    """
-    por_prof: dict[str, list] = defaultdict(list)
-    for s in secciones:
-        if s.afecta_disponibilidad and s.id in x:
-            por_prof[s.rut_profesor].append(s)  # ← todas las sin profesor quedan agrupadas juntas
-
-    n = 0
-    for secs in por_prof.values():
-        for i in range(len(secs)):
-            for j in range(i + 1, len(secs)):
-                if secs[i].codigo_curso == secs[j].codigo_curso:
-                    continue  # mismo curso → manejado por RC
-                for v1 in x[secs[i].id]:
-                    for v2 in x[secs[j].id]:
-                        model.AddForbiddenAssignments([v1, v2], _PARES_SOLAPAN)
-                        n += 1
-    return n
-
-
-# ---------------------------------------------------------------------------
-# Helper: RD4 — Sala especial única
-# ---------------------------------------------------------------------------
-
-def _agregar_rd4(
-    model: cp_model.CpModel,
-    x: dict[str, list[cp_model.IntVar]],
-    secciones: list,
-    datos,          # DatosProblema completo (necesario para cursos y capacidad_por_sala)
-) -> int:
-    """
-    RD4 — Sala especial: en cada bloque, la cantidad de secciones asignadas
-    a un mismo tipo de sala no puede superar la cantidad de salas físicas disponibles.
-
-    La capacidad viene de datos.capacidad_por_sala (leído de la hoja SALAS ESPECIALES).
-
-    Tres casos según si la capacidad es conocida y su valor:
-
-      capacidad desconocida (sala no en dict)
-          → Solo se restringen cursos DISTINTOS (pairwise). Las secciones del
-            MISMO curso NO se restringen: RC ya las sincroniza al mismo bloque y
-            sin datos de capacidad no podemos saber si hay conflicto real.
-            Este es el comportamiento conservador cuando falta el archivo de salas.
-
-      capacidad = 1 (1 sala física, dato explícito)
-          → Pairwise sobre TODOS los pares, incluido mismo curso. Si un curso
-            tiene más secciones paralelas que salas físicas, CP-SAT reportará
-            INFEASIBLE correctamente.
-
-      capacidad > 1 (C salas físicas)
-          → Sum constraint: at most C secciones en el mismo bloque. Incluye
-            mismo curso. RC garantiza que las secciones de un mismo grupo
-            de componente van al mismo bloque, por lo que el conteo es correcto.
-
-    Solo aplica a CLAS y LABT (AYUD no usa sala especial).
-    """
-    por_sala: dict[str, list] = defaultdict(list)
-    for s in secciones:
-        if s.id not in x:
-            continue
-        if s.componente == TipoReunion.AYUD:
-            continue
-        curso = datos.cursos.get(s.codigo_curso)
-        if curso and curso.sala_especial:
-            por_sala[curso.sala_especial].append(s)
-
-    cap = datos.capacidad_por_sala   # {sala_name: n_salas_fisicas}
-    n = 0
-
-    for sala, secs in por_sala.items():
-        capacidad = cap.get(sala, None)  # None = sin datos de capacidad física
-
-        if capacidad is None:
-            # Capacidad desconocida: solo restringir cursos distintos (conservador)
-            # No tocar pares del mismo curso para no contradecir RC.
-            for i in range(len(secs)):
-                for j in range(i + 1, len(secs)):
-                    if secs[i].codigo_curso == secs[j].codigo_curso:
-                        continue
-                    for v1 in x[secs[i].id]:
-                        for v2 in x[secs[j].id]:
-                            model.AddForbiddenAssignments([v1, v2], _PARES_SOLAPAN)
-                            n += 1
-
-        elif capacidad == 1:
-            # 1 sala física (dato explícito): ningún par puede solaparse
-            for i in range(len(secs)):
-                for j in range(i + 1, len(secs)):
-                    for v1 in x[secs[i].id]:
-                        for v2 in x[secs[j].id]:
-                            model.AddForbiddenAssignments([v1, v2], _PARES_SOLAPAN)
-                            n += 1
-
-        else:
-            # C > 1 salas físicas: at most (capacidad) secciones en el mismo bloque.
-            # La restricción intra-sección garantiza que los bloques de una misma
-            # sección están en días distintos, por lo que cada variable aporta
-            # a lo sumo 1 indicator por bloque.
-            for block_idx in range(N_BLOQUES):
-                indicators = []
-                for s in secs:
-                    for var in x[s.id]:
-                        b = model.NewBoolVar(f"rd4_b{block_idx}_{s.id}")
-                        model.Add(var == block_idx).OnlyEnforceIf(b)
-                        model.Add(var != block_idx).OnlyEnforceIf(b.Not())
-                        indicators.append(b)
-                if len(indicators) > capacidad:
-                    model.Add(sum(indicators) <= capacidad)
-                    n += 1
-
-    return n
-
-
-# ---------------------------------------------------------------------------
-# Helper: RD7 — Ayudantías desde 12:30
-# ---------------------------------------------------------------------------
-
-def _agregar_rd7(
-    model: cp_model.CpModel,
-    x: dict[str, list[cp_model.IntVar]],
-    secciones: list,
-) -> int:
-    """Bloques de AYUD deben iniciar a las 12:30 o después."""
-    n = 0
-    for s in secciones:
-        if s.componente != TipoReunion.AYUD or s.id not in x:
-            continue
-        for var in x[s.id]:
-            for forbidden in _BLOQUES_PROHIBIDOS_AYUD:
-                model.Add(var != forbidden)
-                n += 1
-    return n
-
-
-# ---------------------------------------------------------------------------
 # Agrupación de secciones paralelas
 # ---------------------------------------------------------------------------
 
@@ -366,110 +128,6 @@ def disponibilidad_seccion(
     if tiene:
         return {b for b in base if b in prof.disponibilidad}
     return {b for b in base if b in SET_ESTANDAR}
-
-
-def _puede_alojar(dom: set[int], n: int) -> bool:
-    """True si en `dom` caben n bloques mutuamente no solapados."""
-    picked: list[int] = []
-    for b in sorted(dom):
-        if all(not MATRIZ_SOLAPAMIENTO[b][p] for p in picked):
-            picked.append(b)
-            if len(picked) >= n:
-                return True
-    return len(picked) >= n
-
-
-@dataclass
-class GrupoParalelo:
-    """Conjunto de secciones que se dictan en paralelo (mismo bloque)."""
-    ids: list[str]                 # sec_ids sincronizadas a este grupo
-    codigo: str
-    componente: TipoReunion
-    n_blocks: int                  # bloques necesarios (igual para todo el grupo)
-    dominio: list[int]             # bloques candidatos = ∩ disponibilidad del grupo
-    profesores: set[str]           # ruts que afectan disponibilidad en el grupo
-    sala: str | None               # sala especial del curso (si aplica)
-
-
-def agrupar_paralelas(
-    datos: DatosProblema, secciones: list, usar_rd2: bool = True
-) -> tuple[list[GrupoParalelo], dict[str, int]]:
-    """
-    Agrupa las secciones de cada (curso, componente) que PUEDEN dictarse en paralelo.
-
-    Dos secciones pueden ir en el mismo grupo si:
-      1. La intersección de la disponibilidad de sus profesores aún aloja los bloques
-         necesarios (sus profesores coinciden en horario).
-      2. No comparten profesor (un profesor no puede dictar dos secciones a la vez).
-      3. No exceden la capacidad de salas físicas (para componentes con sala especial).
-
-    Las secciones que no caben en ningún grupo existente abren un grupo nuevo.
-    Retorna (grupos, sec_id → índice de grupo).
-    """
-    grupos: list[GrupoParalelo] = []
-    sec2grupo: dict[str, int] = {}
-
-    por_cc: dict[tuple, list] = defaultdict(list)
-    for s in secciones:
-        por_cc[(s.codigo_curso, s.componente)].append(s)
-
-    for (cod, comp), secs in por_cc.items():
-        curso = datos.cursos.get(cod)
-        sala = curso.sala_especial if curso else None
-        cap = datos.capacidad_por_sala.get(sala) if sala else None
-        usa_sala = sala is not None and comp != TipoReunion.AYUD
-
-        # Precomputar disponibilidad por sección y ordenar de MÁS RÍGIDA a más flexible.
-        # Así las secciones con poca disponibilidad forman su grupo primero (o quedan
-        # solas) y las flexibles se suman después al grupo que mejor calce, sin quedar
-        # encadenadas a un profesor rígido.
-        info = []
-        for s in secs:
-            d = disponibilidad_seccion(datos, s, usar_rd2)
-            prof = s.rut_profesor if (s.afecta_disponibilidad and s.rut_profesor) else None
-            info.append((s, d, s.cantidad_bloques_necesarios, prof))
-        info.sort(key=lambda t: (len(t[1]), str(t[0].seccion)))
-
-        clusters: list[dict] = []
-        for s, d, n, prof in info:
-            # Entre los clusters donde la sección PUEDE entrar, elegir el de mayor
-            # intersección resultante (best-fit: conserva más flexibilidad).
-            mejor = None
-            mejor_inter: set[int] = set()
-            for cl in clusters:
-                if prof and prof in cl["profs"]:
-                    continue                                  # mismo profesor → no paralelas
-                if usa_sala and cap is not None and len(cl["secs"]) >= cap:
-                    continue                                  # capacidad de sala llena
-                nueva_inter = cl["inter"] & d
-                if not _puede_alojar(nueva_inter, max(n, cl["n"])):
-                    continue                                  # ya no coinciden en horario
-                if mejor is None or len(nueva_inter) > len(mejor_inter):
-                    mejor, mejor_inter = cl, nueva_inter
-
-            if mejor is not None:
-                mejor["inter"] = mejor_inter
-                mejor["secs"].append(s)
-                mejor["n"] = max(mejor["n"], n)
-                if prof:
-                    mejor["profs"].add(prof)
-            else:
-                clusters.append({
-                    "inter": set(d), "secs": [s],
-                    "profs": {prof} if prof else set(), "n": n,
-                })
-
-        for cl in clusters:
-            idx = len(grupos)
-            grupos.append(GrupoParalelo(
-                ids=[s.id for s in cl["secs"]],
-                codigo=cod, componente=comp, n_blocks=cl["n"],
-                dominio=sorted(cl["inter"]), profesores=cl["profs"], sala=sala,
-            ))
-            for s in cl["secs"]:
-                sec2grupo[s.id] = idx
-
-    return grupos, sec2grupo
 
 
 # ---------------------------------------------------------------------------
@@ -717,50 +375,6 @@ def verificar_topes(
     return topes
 
 
-def verificar_rc(
-    datos: DatosProblema,
-    asignaciones: dict[str, list[int]],
-) -> dict[str, list]:
-    """
-    Verifica RC en la solución. Retorna:
-      "desync":  [(sec1_id, sec2_id)] pares del mismo curso/componente con bloques distintos
-      "solapan": [(sec1_id, sec2_id)] pares de componentes distintos del mismo curso que solapan
-    """
-    sec_by_id = {s.id: s for s in datos.secciones}
-    asig_secs = [sec_by_id[sid] for sid in asignaciones if sid in sec_by_id]
-
-    por_cc: dict[tuple, list[str]] = defaultdict(list)
-    for s in asig_secs:
-        por_cc[(s.codigo_curso, s.componente)].append(s.id)
-
-    codigos = {s.codigo_curso for s in asig_secs}
-    desync: list[tuple] = []
-    solapan: list[tuple] = []
-
-    for codigo in codigos:
-        for comp in TipoReunion:
-            ids = por_cc.get((codigo, comp), [])
-            if len(ids) < 2:
-                continue
-            bloques_ref = asignaciones[ids[0]]
-            for sid in ids[1:]:
-                if asignaciones[sid] != bloques_ref:
-                    desync.append((ids[0], sid))
-
-        comps_presentes = [c for c in TipoReunion if (codigo, c) in por_cc]
-        for i in range(len(comps_presentes)):
-            for j in range(i + 1, len(comps_presentes)):
-                c1, c2 = comps_presentes[i], comps_presentes[j]
-                sid1 = por_cc[(codigo, c1)][0]
-                sid2 = por_cc[(codigo, c2)][0]
-                if any(MATRIZ_SOLAPAMIENTO[b1][b2]
-                       for b1 in asignaciones[sid1]
-                       for b2 in asignaciones[sid2]):
-                    solapan.append((sid1, sid2))
-
-    return {"desync": desync, "solapan": solapan}
-
-
 def verificar_intra(
     asignaciones: dict[str, list[int]],
 ) -> list[tuple[str, int, int]]:
@@ -892,12 +506,10 @@ def imprimir_resultado(datos: DatosProblema, resultado: ResultadoSolver) -> None
     total_bloques = sum(len(b) for b in resultado.asignaciones.values())
     print(f"Bloques totales:      {total_bloques}")
     print(f"Restricciones RD1:    {resultado.n_rd1}")
-    print(f"Restricciones RD2:    {resultado.n_rd2}")
-    print(f"Restricciones RC:     {resultado.n_rc}")
+    print(f"Restricciones NRC:    {resultado.n_rc}")
     print(f"Restricciones intra:  {resultado.n_intra}")
     print(f"Restricciones RD3:    {resultado.n_rd3}")
     print(f"Restricciones RD4:    {resultado.n_rd4}")
-    print(f"Restricciones RD7:    {resultado.n_rd7}")
 
     if not resultado.asignaciones:
         return
