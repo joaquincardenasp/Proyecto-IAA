@@ -430,7 +430,7 @@ def _sheet_reporte(wb: openpyxl.Workbook, reporte: dict) -> None:
         vc.font = _font()
 
     _rsm(1, "Total violaciones duras (RD1/RD3/RD4)", res.get("total_duras", 0))
-    _rsm(2, "Total violaciones blandas (RB1–RB5)",   res.get("total_blandas", 0))
+    _rsm(2, "Total violaciones blandas (RB1–RB4)",   res.get("total_blandas", 0))
     _rsm(3, "Penalización total blandas",             res.get("penalizacion_total", 0))
     _rsm(4, "Desglose por RB", " | ".join(
         f"{k}: {v:.0f}" for k, v in sorted(res.get("penalizacion_por_rb", {}).items())

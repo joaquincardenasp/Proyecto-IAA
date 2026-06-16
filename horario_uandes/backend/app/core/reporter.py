@@ -5,7 +5,7 @@ La función principal generar_reporte_detallado() analiza una solución (asignac
 y retorna un dict estructurado con:
   resumen             → conteos y penalización por tipo
   violaciones_duras   → RD1 (topes), RD3 (profesor), RD4 (sala)
-  violaciones_blandas → RB1–RB5 (calidad del horario)
+  violaciones_blandas → RB1–RB4 (calidad del horario)
 
 Cada violación es un dict con:
   tipo        → "RD1", "RB2", etc.
@@ -36,7 +36,7 @@ _HORAS_EXTREMAS = {"8:30", "17:30"}
 _CURSO_PROG = "ING1103"
 
 PESOS_RB: dict[str, float] = {
-    "RB1": 100, "RB2": 80, "RB3": 50, "RB4": 50, "RB5": 60,
+    "RB1": 100, "RB2": 80, "RB3": 50, "RB4": 50,
 }
 
 
@@ -461,42 +461,6 @@ def _rb4(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
     return violaciones
 
 
-def _rb5(
-    datos: DatosProblema,
-    asig: dict[str, list[int]],
-    historico: dict[str, dict[str, set[int]]],
-) -> list[dict]:
-    """Bloques asignados que difieren del histórico de semestres anteriores."""
-    sec_by_id = {s.id: s for s in datos.secciones}
-    violaciones: list[dict] = []
-    for sec_id, bloques in asig.items():
-        s = sec_by_id.get(sec_id)
-        if not s:
-            continue
-        hist = historico.get(s.codigo_curso, {}).get(s.componente.value, set())
-        if not hist:
-            continue
-        no_hist = [b for b in bloques if b not in hist]
-        if not no_hist:
-            continue
-        info = _sec_info(s, datos)
-        bloques_str = [_bloque_str(b) for b in no_hist]
-        hist_str = [_bloque_str(b) for b in sorted(hist)[:3]]
-        msg = (
-            f"{info['codigo']}-{info['seccion']} {info['tipo']}: "
-            f"{len(no_hist)} bloque(s) distintos al histórico "
-            f"({', '.join(bloques_str)}) — "
-            f"histórico preferido: {', '.join(hist_str)}"
-        )
-        violaciones.append(_viol(
-            "RB5", "Cambio respecto al histórico", msg,
-            [info], bloques_str,
-            f"Histórico: {', '.join(hist_str)}",
-            penalizacion=len(no_hist) * PESOS_RB["RB5"],
-        ))
-    return violaciones
-
-
 # ---------------------------------------------------------------------------
 # Función principal
 # ---------------------------------------------------------------------------
@@ -504,7 +468,6 @@ def _rb5(
 def generar_reporte_detallado(
     datos: DatosProblema,
     asignaciones: dict[str, list[int]],
-    historico: dict[str, dict[str, set[int]]] | None = None,
 ) -> dict:
     """
     Genera el reporte completo de violaciones de restricciones.
@@ -512,7 +475,6 @@ def generar_reporte_detallado(
     Args:
         datos:        DatosProblema (cursos, secciones, profesores)
         asignaciones: solución GA final (sec_id → [bloque_idx, ...])
-        historico:    Datos históricos para RB5 (opcional)
 
     Returns:
         {
@@ -532,8 +494,6 @@ def generar_reporte_detallado(
     blandas.extend(_rb2(datos, asignaciones))
     blandas.extend(_rb3(datos, asignaciones))
     blandas.extend(_rb4(datos, asignaciones))
-    if historico:
-        blandas.extend(_rb5(datos, asignaciones, historico))
 
     por_tipo_dura: dict[str, int] = {}
     for v in duras:
