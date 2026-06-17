@@ -135,10 +135,19 @@ def disponibilidad_seccion(
         de minimizar bloques helper (CP-SAT) y la penalización PESO_BLOQUE_HELPER (GA).
     """
     es_ayud = s.componente == TipoReunion.AYUD
+    tipos = getattr(s, "tipos_bloques_necesarios", [])
     dur = getattr(s, "duracion_bloque", "2h")
-    base = {b for b in range(N_BLOQUES)
-            if TODOS_BLOQUES[b].tipo == dur
-            and (not es_ayud or b not in _BLOQUES_PROHIBIDOS_AYUD)}
+    if tipos:
+        # Sección 2+1: incluir bloques de todos los tipos necesarios
+        tipos_validos = set(tipos)
+        base = {b for b in range(N_BLOQUES)
+                if TODOS_BLOQUES[b].tipo in tipos_validos
+                and (not es_ayud or b not in _BLOQUES_PROHIBIDOS_AYUD)}
+    else:
+        base = {b for b in range(N_BLOQUES)
+                if TODOS_BLOQUES[b].tipo == dur
+                and (not es_ayud or b not in _BLOQUES_PROHIBIDOS_AYUD)}
+                
     prof = datos.profesores.get(s.rut_profesor) if s.rut_profesor else None
     tiene = usar_rd2 and s.afecta_disponibilidad and prof is not None and bool(prof.disponibilidad)
     if tiene:

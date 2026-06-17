@@ -19,11 +19,7 @@ from typing import Any
 
 from deap import base, creator, tools
 
-<<<<<<< HEAD
-from .blocks import BLOQUES_1H, BLOQUES_2H_SET, MATRIZ_SOLAPAMIENTO, N_BLOQUES, SET_ESTANDAR, TODOS_BLOQUES
-=======
-from .blocks import MATRIZ_SOLAPAMIENTO, SET_ESTANDAR, TODOS_BLOQUES
->>>>>>> main
+from .blocks import BLOQUES_1H, BLOQUES_2H_SET, MATRIZ_SOLAPAMIENTO, SET_ESTANDAR, TODOS_BLOQUES
 from .models import DatosProblema, TipoProfesor, TipoReunion
 from .solver_cpsat import disponibilidad_seccion
 
@@ -136,37 +132,19 @@ def construir_contexto(
         )
         rep_es_jornada.append(es_jornada)
 
-<<<<<<< HEAD
-        # Bloques disponibles para este rep (debe coincidir con el dominio de CP-SAT):
-        #   AYUD → solo desde 12:30 (RD7)
-        #   con disponibilidad declarada → bloques del profesor (estándar + helper)
-        #   sin disponibilidad → solo bloques ESTÁNDAR (preserva la grilla institucional)
-        base = _BLOQUES_VALIDOS_AYUD.copy() if es_ayud else list(range(N_BLOQUES))
-        prof = datos.profesores.get(s.rut_profesor) if s.rut_profesor else None
-        tiene_disp = s.afecta_disponibilidad and prof is not None and bool(prof.disponibilidad)
-        if tiene_disp:
-            disponibles_base = [b for b in base if b in prof.disponibilidad]
-        else:
-            disponibles_base = [b for b in base if b in SET_ESTANDAR]
+        # Bloques disponibles: usar disponibilidad_seccion como base (RD2+RD7 ya aplicados)
+        # y luego filtrar por tipo de bloque para el caso 2+1.
+        disponibles_base = sorted(disponibilidad_seccion(datos, s))
 
-        # Para secciones 2+1 el dominio por variable se maneja en mutate/cruce;
-        # aquí guardamos el dominio completo separado por tipo.
-        # Para secciones normales, excluir bloques de 1h.
         tipos = s.tipos_bloques_necesarios
         if tipos:
-            # 2+1: guardar como lista de listas [[dom_2h], [dom_1h]]
+            # 2+1: lista de listas [[dom_2h], [dom_1h]]
             rep_disponibles.append([
                 [b for b in disponibles_base if b in BLOQUES_2H_SET],
                 [b for b in disponibles_base if b in BLOQUES_1H],
             ])
         else:
             rep_disponibles.append([b for b in disponibles_base if b not in BLOQUES_1H])
-=======
-        # Bloques disponibles para este rep: EXACTAMENTE el mismo dominio que usa CP-SAT
-        # (disponibilidad_seccion ya filtra por duración 2h/3h, RD2 y RD7). Reutilizar la
-        # misma función garantiza que el GA nunca mueva una sección fuera de lo permitido.
-        rep_disponibles.append(sorted(disponibilidad_seccion(datos, s)))
->>>>>>> main
 
         rep_es_prog_labt.append(
             s.codigo_curso == CURSO_PROGRAMACION and s.componente == TipoReunion.LABT

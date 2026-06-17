@@ -29,8 +29,6 @@ class Profesor:
     rut: str
     nombre: str
     tipo: TipoProfesor
-    # Índices de bloques donde el profesor está disponible (de TODOS_BLOQUES).
-    # Set vacío = disponibilidad total (no hay datos o los campos del Maestro estaban vacíos).
     disponibilidad: set[int] = field(default_factory=set)
 
 
@@ -38,13 +36,7 @@ class Profesor:
 class Curso:
     codigo: str
     titulo: str
-    # Unión de semestres por carrera a través de los 3 planes de estudio.
-    # carrera ∈ {"Plan Común", "ICI", "IOC", "ICE", "ICC", "ICA", "ICQ"}
-    # semestre es un STRING que preserva sufijos de mención: "9a", "10f", "1", etc.
-    # Un mismo curso puede pertenecer a múltiples semestres de una carrera si
-    # los planes difieren (ej. ICC-"7" en PE2022 y ICC-"6" en PE2025).
     semestres_por_carrera: dict[str, set[str]] = field(default_factory=dict)
-    # Planes en los que aparece este curso (para reportes y conteo)
     planes: set[str] = field(default_factory=set)
     clases_horas: int = 0
     ayudantias_horas: int = 0
@@ -61,24 +53,14 @@ class Seccion:
     rut_profesor: str
     afecta_disponibilidad: bool
     cantidad_bloques_necesarios: int = 1
-<<<<<<< HEAD
-    tipos_bloques_necesarios: list[str] = field(default_factory=list)  # [] = todos iguales; ["2h","1h"] = 2+1
-    bloques_asignados: list = field(default_factory=list)
-=======
-    # Duración del bloque que requiere esta sección: "2h" o "3h".
-    # El solver solo le asigna bloques de este tipo (una clase de 2h no puede ir en
-    # un bloque de 3h y viceversa). "3h" solo para clases "3-juntas" o de 3 horas.
+    tipos_bloques_necesarios: list[str] = field(default_factory=list)  # [] = normal; ["2h","1h"] = 2+1
     duracion_bloque: str = "2h"
-    bloques_asignados: list = field(default_factory=list)  # lista de BloqueHorario
+    bloques_asignados: list = field(default_factory=list)
 
->>>>>>> main
 
 @dataclass
 class DatosProblema:
-    cursos: dict[str, Curso] = field(default_factory=dict)         # codigo → Curso
+    cursos: dict[str, Curso] = field(default_factory=dict)
     secciones: list[Seccion] = field(default_factory=list)
-    profesores: dict[str, Profesor] = field(default_factory=dict)  # rut → Profesor
-    # sala_name → cantidad de salas físicas de ese tipo
-    # sala_name = el NOMBRE que aparece en Curso.sala_especial (parte antes de " EN HORARIO DE ")
-    # Ej: {"LABT COMPUTACION": 4, "LABT ELECTRICA": 1, "SALA CON ENCHUFE INDIVIDUAL": 8}
+    profesores: dict[str, Profesor] = field(default_factory=dict)
     capacidad_por_sala: dict[str, int] = field(default_factory=dict)

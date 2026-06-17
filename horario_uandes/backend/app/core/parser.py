@@ -708,11 +708,8 @@ def _leer_maestro(
                     rut_profesor=rut1,
                     afecta_disponibilidad=bool(rut1),
                     cantidad_bloques_necesarios=_calcular_bloques_clas(clas_h, distribucion),
-<<<<<<< HEAD
                     tipos_bloques_necesarios=["2h", "1h"] if es_2mas1 else [],
-=======
                     duracion_bloque=_duracion_bloque_clas(clas_h, distribucion),
->>>>>>> main
                 ))
 
         if ayud_h > 0:
