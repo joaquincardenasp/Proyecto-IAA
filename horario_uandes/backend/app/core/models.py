@@ -61,8 +61,8 @@ class Seccion:
     rut_profesor: str
     afecta_disponibilidad: bool
     cantidad_bloques_necesarios: int = 1
-    bloques_asignados: list = field(default_factory=list)  # lista de BloqueHorario
-
+    tipos_bloques_necesarios: list[str] = field(default_factory=list)  # [] = todos iguales; ["2h","1h"] = 2+1
+    bloques_asignados: list = field(default_factory=list)
 
 @dataclass
 class DatosProblema:

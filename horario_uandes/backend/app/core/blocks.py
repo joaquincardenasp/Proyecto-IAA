@@ -56,6 +56,17 @@ _BLOQUES_DEF: list[tuple[str, str, str, bool]] = [
     ("14:30", "17:20", "3h", False),
     ("15:30", "18:20", "3h", False),
     ("16:30", "19:20", "3h", False),   # el caso del profesor disponible solo en la tarde
+    # ── bloques de 1h ESTÁNDAR (solo para el componente corto de clases 2+1) ──
+    ("8:30",  "9:20",  "1h", True),
+    ("9:30",  "10:20", "1h", True),
+    ("10:30", "11:20", "1h", True),
+    ("11:30", "12:20", "1h", True),
+    ("12:30", "13:20", "1h", True),
+    ("13:30", "14:20", "1h", True),
+    ("14:30", "15:20", "1h", True),
+    ("15:30", "16:20", "1h", True),
+    ("16:30", "17:20", "1h", True),
+    ("17:30", "18:20", "1h", True),
 ]
 
 BLOQUES_2H = [d for d in _BLOQUES_DEF if d[2] == "2h"]
@@ -128,6 +139,9 @@ N_BLOQUES = len(TODOS_BLOQUES)
 BLOQUES_ESTANDAR: list[int] = [i for i, b in enumerate(TODOS_BLOQUES) if b.es_estandar]
 BLOQUES_HELPER:   list[int] = [i for i, b in enumerate(TODOS_BLOQUES) if not b.es_estandar]
 SET_ESTANDAR: frozenset[int] = frozenset(BLOQUES_ESTANDAR)
+BLOQUES_1H: frozenset[int] = frozenset(i for i, b in enumerate(TODOS_BLOQUES) if b.tipo == "1h")
+BLOQUES_2H_SET: frozenset[int] = frozenset(i for i, b in enumerate(TODOS_BLOQUES) if b.tipo == "2h")
+BLOQUES_3H_SET: frozenset[int] = frozenset(i for i, b in enumerate(TODOS_BLOQUES) if b.tipo == "3h")
 
 # Matriz de solapamiento [i][j] = True si TODOS_BLOQUES[i] solapa con TODOS_BLOQUES[j]
 MATRIZ_SOLAPAMIENTO: list[list[bool]] = [

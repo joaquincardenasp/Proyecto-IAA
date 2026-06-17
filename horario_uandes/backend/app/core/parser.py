@@ -400,17 +400,27 @@ def _calcular_bloques_clas(horas: int, distribucion: str) -> int:
     """
     Bloques necesarios para CLAS según horas y distribución:
       "3" o "3-juntas" → 1 bloque de 3h (independiente de las horas)
+      "2+1" → 2 bloques separados (una sesión larga y una corta)
       horas == 3 sin distribución explícita → 1 bloque de 3h
-      "2+1" → tratar como 2h en v1
       Resto → ceil(horas/2), mínimo 1
     """
     d = _norm(distribucion or "")
+    
+    # 1. Si el Excel dice explícitamente que van juntas
     if d in ("3", "3-juntas"):
         return 1
+        
+    # 2. Si el Excel indica formato "2+1", forzamos 2 bloques distintos
+    if "2+1" in d:
+        return 2
+        
+    # 3. Reglas por defecto según la cantidad de horas numéricas
     if horas <= 0:
         return 1
     if horas == 3:
-        return 1
+        return 1 # Si son 3 horas pero no dice "2+1", asume 1 bloque gigante por defecto
+        
+    # 4. Fórmula matemática general para el resto de los casos
     return max(1, math.ceil(horas / 2))
 
 
@@ -661,6 +671,8 @@ def _leer_maestro(
             sec_id = f"{sec_base}-CLAS"
             if sec_id not in sec_ids_creados:
                 sec_ids_creados.add(sec_id)
+                d_norm = _norm(distribucion or "")
+                es_2mas1 = "2+1" in d_norm
                 secciones.append(Seccion(
                     id=sec_id,
                     codigo_curso=codigo,
@@ -669,6 +681,7 @@ def _leer_maestro(
                     rut_profesor=rut1,
                     afecta_disponibilidad=bool(rut1),
                     cantidad_bloques_necesarios=_calcular_bloques_clas(clas_h, distribucion),
+                    tipos_bloques_necesarios=["2h", "1h"] if es_2mas1 else [],
                 ))
 
         if ayud_h > 0:

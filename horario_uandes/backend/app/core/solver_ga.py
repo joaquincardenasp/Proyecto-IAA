@@ -22,7 +22,7 @@ from typing import Any
 
 from deap import base, creator, tools
 
-from .blocks import MATRIZ_SOLAPAMIENTO, N_BLOQUES, SET_ESTANDAR, TODOS_BLOQUES
+from .blocks import BLOQUES_1H, BLOQUES_2H_SET, MATRIZ_SOLAPAMIENTO, N_BLOQUES, SET_ESTANDAR, TODOS_BLOQUES
 from .models import DatosProblema, TipoProfesor, TipoReunion
 
 # ---------------------------------------------------------------------------
@@ -150,10 +150,22 @@ def construir_contexto(
         prof = datos.profesores.get(s.rut_profesor) if s.rut_profesor else None
         tiene_disp = s.afecta_disponibilidad and prof is not None and bool(prof.disponibilidad)
         if tiene_disp:
-            disponibles = [b for b in base if b in prof.disponibilidad]
+            disponibles_base = [b for b in base if b in prof.disponibilidad]
         else:
-            disponibles = [b for b in base if b in SET_ESTANDAR]
-        rep_disponibles.append(disponibles)
+            disponibles_base = [b for b in base if b in SET_ESTANDAR]
+
+        # Para secciones 2+1 el dominio por variable se maneja en mutate/cruce;
+        # aquí guardamos el dominio completo separado por tipo.
+        # Para secciones normales, excluir bloques de 1h.
+        tipos = s.tipos_bloques_necesarios
+        if tipos:
+            # 2+1: guardar como lista de listas [[dom_2h], [dom_1h]]
+            rep_disponibles.append([
+                [b for b in disponibles_base if b in BLOQUES_2H_SET],
+                [b for b in disponibles_base if b in BLOQUES_1H],
+            ])
+        else:
+            rep_disponibles.append([b for b in disponibles_base if b not in BLOQUES_1H])
 
         rep_es_prog_labt.append(
             s.codigo_curso == CURSO_PROGRAMACION and s.componente == TipoReunion.LABT
@@ -417,11 +429,25 @@ def mutate_ga(
     for rep_idx in orden:
         disponibles = ctx.rep_disponibles[rep_idx]
         n = ctx.rep_n_blocks[rep_idx]
-        if len(disponibles) < n:
-            continue
+
+        # Detectar si es dominio por tipo (lista de listas = caso 2+1)
+        es_2mas1 = isinstance(disponibles[0], list) if disponibles else False
+
+        if es_2mas1:
+            dom_por_tipo = disponibles  # [[dom_2h], [dom_1h]]
+            if any(len(d) == 0 for d in dom_por_tipo):
+                continue
+        else:
+            if len(disponibles) < n:
+                continue
 
         for _ in range(n_intentos):
-            candidato = sorted(random.sample(disponibles, n))
+            if es_2mas1:
+                candidato = sorted(
+                    random.choice(dom_por_tipo[k]) for k in range(n)
+                )
+            else:
+                candidato = sorted(random.sample(disponibles, n))
             if _es_factible(rep_idx, candidato, individuo, ctx):
                 individuo[rep_idx] = candidato
                 return (individuo,)

@@ -37,6 +37,10 @@ Restricciones duras (ver README.md §2 para el detalle completo):
 Objetivo: minimizar el uso de bloques helper (preferir la grilla institucional estándar).
 
 Solapamiento: verificado por sub-bloques (MATRIZ_SOLAPAMIENTO), NO por igualdad de índice.
+
+Fallback: si CP-SAT retorna INFEASIBLE, resolver_con_fallback() relaja restricciones
+progresivamente hasta encontrar alguna solución parcial que pueda pasar al GA y al
+reporter (las violaciones se documentan en el reporte final).
 """
 from __future__ import annotations
 
@@ -47,11 +51,15 @@ from ortools.sat.python import cp_model
 
 from .blocks import (
     BLOQUES_HELPER,
+    BLOQUES_1H,
+    BLOQUES_2H_SET,
+    BLOQUES_3H_SET,
     MATRIZ_SOLAPAMIENTO,
     N_BLOQUES,
     SET_ESTANDAR,
     TODOS_BLOQUES,
 )
+
 from .models import DatosProblema, TipoReunion
 
 
@@ -72,6 +80,9 @@ class ResultadoSolver:
     n_rd4: int = 0
     n_rd7: int = 0   # RD7 va en el dominio de las AYUD → 0
     n_rd8: int = 0   # no usado en el modelo actual
+    # Campos de fallback: indican si se relajaron restricciones para obtener la solución.
+    nivel_relajacion: int = 0        # 0 = solución completa; >0 = restricciones relajadas
+    advertencia_relajacion: str = "" # mensaje para mostrar en el frontend
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +97,6 @@ _PARES_SOLAPAN: list[tuple[int, int]] = [
 ]
 
 # Cobertura por sub-bloque: (dia, minuto_inicio_subbloque) → índices de bloque que lo cubren.
-# Sirve para la capacidad de salas: dos bloques DISTINTOS que comparten un sub-bloque
-# ocupan la sala en ese instante (ej. 10:30-13:20 y 12:30-15:20 comparten 12:30).
 _COBERTURA_SUBBLOQUE: dict[tuple[str, int], list[int]] = defaultdict(list)
 for _i, _b in enumerate(TODOS_BLOQUES):
     for _sub in _b.sub_bloques:
@@ -108,7 +117,7 @@ _BLOQUES_PROHIBIDOS_AYUD: list[int] = [
 
 
 # ---------------------------------------------------------------------------
-# Agrupación de secciones paralelas
+# Disponibilidad de sección
 # ---------------------------------------------------------------------------
 
 def disponibilidad_seccion(
@@ -131,7 +140,7 @@ def disponibilidad_seccion(
 
 
 # ---------------------------------------------------------------------------
-# Función principal
+# Función principal del solver
 # ---------------------------------------------------------------------------
 
 def resolver(
@@ -141,23 +150,21 @@ def resolver(
     usar_rd2: bool = True,
     usar_rd3: bool = True,
     usar_rd4: bool = True,
+    _forzar_rd1: bool = True,
 ) -> ResultadoSolver:
     """
-    Asigna bloques a nivel de SECCIÓN. El solver decide el paralelismo por sí mismo:
-    para que todos los ramos de un semestre quepan sin topes (RD1 estricto entre cursos
-    distintos), pone en paralelo las secciones de un mismo curso donde la disponibilidad
-    de sus profesores lo permite. No se pre-agrupa.
+    Asigna bloques a nivel de SECCIÓN.
 
-    Restricciones duras:
-      RD2  — cada sección en la disponibilidad de su profesor (o grilla estándar si no
-             hay datos; AYUD solo desde 12:30 = RD7, ya en el dominio).
-      intra — los bloques de una sección no se solapan entre sí.
-      NRC  — dentro de una sección (CLAS-k/AYUD-k/LABT-k) los componentes no se solapan.
-      RD1  — secciones de cursos DISTINTOS del mismo (carrera, semestre) no se solapan;
-             las del MISMO curso quedan exentas (pueden ir en paralelo).
-      RD3  — un profesor no dicta dos secciones a la vez.
-      RD4  — en cada bloque, las secciones que usan un mismo tipo de sala no superan
-             las salas físicas disponibles.
+    Restricciones duras activas según parámetros:
+      RD2  — disponibilidad del profesor (o grilla estándar si no hay datos).
+             AYUD solo desde 12:30 (RD7, siempre activo).
+      intra — los bloques de una sección no se solapan entre sí (siempre activo).
+      NRC  — componentes de la misma sección no se solapan (siempre activo).
+      RD1  — secciones de cursos DISTINTOS del mismo (carrera, semestre) no se solapan.
+             Controlado por _forzar_rd1 (True por defecto; False solo en último fallback).
+      RD3  — un profesor no dicta dos secciones a la vez. Controlado por usar_rd3.
+      RD4  — capacidad de salas especiales. Controlado por usar_rd4.
+
     Objetivo: minimizar bloques helper (preferir la grilla estándar).
     """
     if carreras is None:
@@ -176,14 +183,26 @@ def resolver(
     dom_de: dict[str, list[int]] = {}
     x: dict[str, list[cp_model.IntVar]] = {}
     for s in secciones:
-        dom = sorted(disponibilidad_seccion(datos, s, usar_rd2))
-        if not dom:
+        dom_base = sorted(disponibilidad_seccion(datos, s, usar_rd2))
+        if not dom_base:
             return ResultadoSolver(estado="INFEASIBLE")
-        dom_de[s.id] = dom
-        x[s.id] = [
-            model.NewIntVarFromDomain(cp_model.Domain.FromValues(dom), f"{s.id}_b{k}")
-            for k in range(s.cantidad_bloques_necesarios)
-        ]
+        dom_de[s.id] = dom_base
+
+        tipos = s.tipos_bloques_necesarios  # [] o ["2h","1h"]
+        vars_seccion = []
+        for k in range(s.cantidad_bloques_necesarios):
+            if tipos and k < len(tipos):
+                filtro = {"1h": BLOQUES_1H, "2h": BLOQUES_2H_SET, "3h": BLOQUES_3H_SET}.get(tipos[k])
+                dom_k = sorted(b for b in dom_base if filtro is None or b in filtro)
+            else:
+                # sin tipo específico: excluir bloques de 1h (no aplican a clases normales)
+                dom_k = sorted(b for b in dom_base if b not in BLOQUES_1H)
+            if not dom_k:
+                return ResultadoSolver(estado="INFEASIBLE")
+            vars_seccion.append(
+                model.NewIntVarFromDomain(cp_model.Domain.FromValues(dom_k), f"{s.id}_b{k}")
+            )
+        x[s.id] = vars_seccion
 
     def _nover(a_vars, b_vars) -> int:
         c = 0
@@ -193,7 +212,7 @@ def resolver(
                 c += 1
         return c
 
-    # Intra-sección
+    # Intra-sección (siempre activo)
     n_intra = 0
     for s in secciones:
         v = x[s.id]
@@ -202,7 +221,7 @@ def resolver(
                 model.AddForbiddenAssignments([v[k1], v[k2]], _PARES_SOLAPAN)
                 n_intra += 1
 
-    # NRC: componentes distintos de una misma sección (codigo, seccion) no se solapan
+    # NRC: componentes distintos de la misma sección no se solapan (siempre activo)
     n_rc = 0
     por_nrc: dict[tuple, list] = defaultdict(list)
     for s in secciones:
@@ -215,27 +234,28 @@ def resolver(
 
     # RD1: cursos DISTINTOS del mismo (carrera, semestre) no se solapan
     n_rd1 = 0
-    vistos_rd1: set[frozenset] = set()
-    for carrera in carreras:
-        por_sem: dict[str, list] = defaultdict(list)
-        for s in secciones:
-            curso = datos.cursos.get(s.codigo_curso)
-            if not curso:
-                continue
-            for sem in curso.semestres_por_carrera.get(carrera, set()):
-                por_sem[sem].append(s)
-        for grp in por_sem.values():
-            for i in range(len(grp)):
-                for j in range(i + 1, len(grp)):
-                    if grp[i].codigo_curso == grp[j].codigo_curso:
-                        continue
-                    par = frozenset((grp[i].id, grp[j].id))
-                    if par in vistos_rd1:
-                        continue
-                    vistos_rd1.add(par)
-                    n_rd1 += _nover(x[grp[i].id], x[grp[j].id])
+    if _forzar_rd1:
+        vistos_rd1: set[frozenset] = set()
+        for carrera in carreras:
+            por_sem: dict[str, list] = defaultdict(list)
+            for s in secciones:
+                curso = datos.cursos.get(s.codigo_curso)
+                if not curso:
+                    continue
+                for sem in curso.semestres_por_carrera.get(carrera, set()):
+                    por_sem[sem].append(s)
+            for grp in por_sem.values():
+                for i in range(len(grp)):
+                    for j in range(i + 1, len(grp)):
+                        if grp[i].codigo_curso == grp[j].codigo_curso:
+                            continue
+                        par = frozenset((grp[i].id, grp[j].id))
+                        if par in vistos_rd1:
+                            continue
+                        vistos_rd1.add(par)
+                        n_rd1 += _nover(x[grp[i].id], x[grp[j].id])
 
-    # RD3: un profesor (afecta_disponibilidad) no dicta dos secciones a la vez
+    # RD3: un profesor no dicta dos secciones a la vez
     n_rd3 = 0
     if usar_rd3:
         por_prof: dict[str, list] = defaultdict(list)
@@ -247,9 +267,7 @@ def resolver(
                 for j in range(i + 1, len(grp)):
                     n_rd3 += _nover(x[grp[i].id], x[grp[j].id])
 
-    # RD4: capacidad de salas — en cada bloque, las secciones que usan un mismo tipo de
-    # sala no superan las salas físicas. Incluye secciones del mismo curso (las paralelas
-    # consumen una sala cada una).
+    # RD4: capacidad de salas especiales
     n_rd4 = 0
     if usar_rd4:
         por_sala: dict[str, list] = defaultdict(list)
@@ -262,14 +280,12 @@ def resolver(
         for sala, ss in por_sala.items():
             cap = datos.capacidad_por_sala.get(sala)
             if cap is None:
-                cap = 1   # sala de capacidad desconocida → asumir 1 sala física (conservador)
+                cap = 1
             if cap == 1:
-                # 1 sala física: ningún par de secciones puede solaparse (mismo o distinto curso)
                 for i in range(len(ss)):
                     for j in range(i + 1, len(ss)):
                         n_rd4 += _nover(x[ss[i].id], x[ss[j].id])
             else:
-                # cap > 1: a lo más `cap` secciones usando la sala en cada sub-bloque (instante)
                 for (dia, sub), blks in _COBERTURA_SUBBLOQUE.items():
                     blkset = set(blks)
                     inds = []
@@ -334,6 +350,81 @@ def resolver(
         n_rd1=n_rd1, n_rd2=0, n_rc=n_rc, n_intra=n_intra,
         n_rd3=n_rd3, n_rd4=n_rd4, n_rd7=n_rd7, n_rd8=n_rd8,
     )
+
+
+# ---------------------------------------------------------------------------
+# Fallback progresivo — función principal a usar desde routes.py
+# ---------------------------------------------------------------------------
+
+def resolver_con_fallback(
+    datos: DatosProblema,
+    carreras: list[str] | None = None,
+    tiempo_limite_s: float = 60.0,
+) -> ResultadoSolver:
+    """
+    Intenta resolver relajando restricciones progresivamente si CP-SAT devuelve
+    INFEASIBLE. Siempre retorna el mejor intento encontrado (nunca aborta).
+
+    Orden de relajación:
+      Nivel 0 — Completo (RD1 + RD2 + RD3 + RD4)
+      Nivel 1 — Sin RD4 (salas especiales)
+      Nivel 2 — Sin RD3 (conflictos de profesor)
+      Nivel 3 — Sin RD3 ni RD4
+      Nivel 4 — Sin RD3, RD4 ni RD2 (sin disponibilidad)
+      Nivel 5 — Solo intra + NRC (sin ninguna restricción inter-sección)
+
+    Las restricciones omitidas quedarán como violaciones en el reporte final.
+    """
+    niveles: list[dict] = [
+        dict(usar_rd2=True,  usar_rd3=True,  usar_rd4=True,  forzar_rd1=True,
+             label="Solución completa (todas las restricciones)"),
+        dict(usar_rd2=True,  usar_rd3=True,  usar_rd4=False, forzar_rd1=True,
+             label="Sin restricción de salas especiales (RD4 relajada)"),
+        dict(usar_rd2=True,  usar_rd3=False, usar_rd4=True,  forzar_rd1=True,
+             label="Sin conflicto de profesor (RD3 relajada)"),
+        dict(usar_rd2=True,  usar_rd3=False, usar_rd4=False, forzar_rd1=True,
+             label="Sin RD3 ni RD4 — solo topes de malla y disponibilidad"),
+        dict(usar_rd2=False, usar_rd3=False, usar_rd4=False, forzar_rd1=True,
+             label="Sin disponibilidad de profesor (RD2 relajada) — solo topes de malla"),
+        dict(usar_rd2=False, usar_rd3=False, usar_rd4=False, forzar_rd1=False,
+             label="Sin restricciones inter-sección — solución de emergencia"),
+    ]
+
+    for nivel, params in enumerate(niveles):
+        if nivel > 0:
+            print(f"[FALLBACK nivel {nivel}] Reintentando CP-SAT: {params['label']}")
+
+        resultado = resolver(
+            datos,
+            carreras=carreras,
+            tiempo_limite_s=tiempo_limite_s,
+            usar_rd2=params["usar_rd2"],
+            usar_rd3=params["usar_rd3"],
+            usar_rd4=params["usar_rd4"],
+            _forzar_rd1=params["forzar_rd1"],
+        )
+
+        if resultado.estado in ("OPTIMAL", "FEASIBLE"):
+            resultado.nivel_relajacion = nivel
+            if nivel == 0:
+                resultado.advertencia_relajacion = ""
+            else:
+                resultado.advertencia_relajacion = (
+                    f"⚠ Solución parcial (nivel {nivel}/5): {params['label']}. "
+                    "Las restricciones omitidas aparecerán como violaciones en el reporte."
+                )
+                print(f"[FALLBACK] ✓ Solución encontrada en nivel {nivel}: {params['label']}")
+            return resultado
+
+    # Nunca debería llegar aquí, pero retornamos INFEASIBLE limpio si ocurre.
+    print("[FALLBACK] ✗ No se encontró solución en ningún nivel.")
+    ultimo = ResultadoSolver(estado="INFEASIBLE")
+    ultimo.nivel_relajacion = len(niveles)
+    ultimo.advertencia_relajacion = (
+        "❌ No se encontró ninguna solución. "
+        "Revisa los datos de disponibilidad y salas en el maestro."
+    )
+    return ultimo
 
 
 # ---------------------------------------------------------------------------
@@ -421,12 +512,6 @@ def verificar_rd4(
 ) -> list[tuple[str, str, str]]:
     """
     Retorna (sec1_id, sec2_id, sala) de violaciones de sala especial.
-
-    Para capacidad = 1: cualquier solapamiento entre dos secciones es una violación.
-    Para capacidad > 1: es una violación cuando más de (capacidad) secciones
-    coinciden en el mismo bloque.
-
-    Incluye pares del mismo curso (a diferencia de la versión anterior).
     """
     sec_by_id = {s.id: s for s in datos.secciones}
     por_sala: dict[str, list[str]] = defaultdict(list)
@@ -444,10 +529,9 @@ def verificar_rd4(
     for sala, ids in por_sala.items():
         capacidad = cap.get(sala)
         if capacidad is None:
-            capacidad = 1   # desconocida → asumir 1 sala física (consistente con resolver)
+            capacidad = 1
 
         if capacidad == 1:
-            # Cualquier solapamiento es violación (incluyendo mismo curso)
             for i in range(len(ids)):
                 for j in range(i + 1, len(ids)):
                     id1, id2 = ids[i], ids[j]
@@ -456,7 +540,6 @@ def verificar_rd4(
                            for b2 in asignaciones[id2]):
                         conflictos.append((id1, id2, sala))
         else:
-            # Violación cuando más de (capacidad) secciones comparten el mismo bloque
             from collections import Counter
             bloque_count: Counter = Counter()
             bloque_secs: dict[int, list[str]] = defaultdict(list)
@@ -467,7 +550,6 @@ def verificar_rd4(
 
             for bloque, count in bloque_count.items():
                 if count > capacidad:
-                    # Todos los pares en exceso son conflictos
                     secs_en_bloque = bloque_secs[bloque]
                     for i in range(len(secs_en_bloque)):
                         for j in range(i + 1, len(secs_en_bloque)):
@@ -502,6 +584,9 @@ def imprimir_resultado(datos: DatosProblema, resultado: ResultadoSolver) -> None
     print("RESULTADO CP-SAT")
     print("=" * 60)
     print(f"Estado:               {resultado.estado}")
+    if resultado.nivel_relajacion > 0:
+        print(f"Nivel de relajación:  {resultado.nivel_relajacion}/5")
+        print(f"Advertencia:          {resultado.advertencia_relajacion}")
     print(f"Secciones asignadas:  {len(resultado.asignaciones)}")
     total_bloques = sum(len(b) for b in resultado.asignaciones.values())
     print(f"Bloques totales:      {total_bloques}")
@@ -514,7 +599,6 @@ def imprimir_resultado(datos: DatosProblema, resultado: ResultadoSolver) -> None
     if not resultado.asignaciones:
         return
 
-    # Uso de bloques helper (no estándar): debería ser bajo
     n_helper = sum(
         1 for bloques in resultado.asignaciones.values()
         for b in bloques if not TODOS_BLOQUES[b].es_estandar
