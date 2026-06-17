@@ -25,7 +25,6 @@ const RESTRICCIONES = [
   { id: 'RB2', label: 'Profesores de jornada sin bloques extremos',       peso: 80  },
   { id: 'RB3', label: 'Componentes del mismo curso en días distintos',    peso: 50  },
   { id: 'RB4', label: 'Máximo una sesión por tipo, curso y día',          peso: 50  },
-  { id: 'RB5', label: 'Proximidad histórica con semestres anteriores',    peso: 60  },
 ]
 
 // ── Props ─────────────────────────────────────────────────────────────────────
@@ -394,7 +393,6 @@ const TIPO_LABEL_RB: Record<string, string> = {
   RB2: 'Profesores jornada en horarios extremos',
   RB3: 'Componentes del mismo curso en mismo día',
   RB4: 'Múltiples bloques del componente en un día',
-  RB5: 'Cambios respecto al histórico',
 }
 
 function GrupoViolaciones({

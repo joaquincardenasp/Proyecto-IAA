@@ -264,7 +264,17 @@ async def upload_files(files: list[UploadFile] = File(...)):
             if not nombre:
                 continue  # ignorar entradas sin nombre de archivo
             contenido = await f.read()
-            (INPUTS_DIR / nombre).write_bytes(contenido)
+            try:
+                (INPUTS_DIR / nombre).write_bytes(contenido)
+            except PermissionError:
+                # En Windows, un archivo abierto en Excel (o de solo lectura) queda
+                # bloqueado para escritura. Mensaje claro en vez de un 500 genérico.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"No se pudo guardar '{nombre}': el archivo está abierto en "
+                            f"Excel u otro programa, o es de solo lectura. Ciérralo e "
+                            f"intenta de nuevo."),
+                )
             saved.append(nombre)
         if not saved:
             raise HTTPException(status_code=400, detail="No se recibió ningún archivo válido")

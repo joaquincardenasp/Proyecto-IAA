@@ -19,8 +19,9 @@ from typing import Any
 
 from deap import base, creator, tools
 
-from .blocks import MATRIZ_SOLAPAMIENTO, N_BLOQUES, SET_ESTANDAR, TODOS_BLOQUES
+from .blocks import MATRIZ_SOLAPAMIENTO, SET_ESTANDAR, TODOS_BLOQUES
 from .models import DatosProblema, TipoProfesor, TipoReunion
+from .solver_cpsat import disponibilidad_seccion
 
 # ---------------------------------------------------------------------------
 # Configuración de pesos
@@ -51,11 +52,6 @@ def _hora_a_min(hora: str) -> int:
 
 _MIN_12_30 = _hora_a_min("12:30")
 _HORAS_EXTREMAS = {"8:30", "17:30"}
-
-_BLOQUES_VALIDOS_AYUD: list[int] = [
-    i for i, b in enumerate(TODOS_BLOQUES)
-    if _hora_a_min(b.hora_inicio) >= _MIN_12_30
-]
 
 _DIA_DEL_BLOQUE: list[str] = [b.dia.value for b in TODOS_BLOQUES]
 _HORA_INICIO_DEL_BLOQUE: list[str] = [b.hora_inicio for b in TODOS_BLOQUES]
@@ -136,18 +132,10 @@ def construir_contexto(
         )
         rep_es_jornada.append(es_jornada)
 
-        # Bloques disponibles para este rep (debe coincidir con el dominio de CP-SAT):
-        #   AYUD → solo desde 12:30 (RD7)
-        #   con disponibilidad declarada → bloques del profesor (estándar + helper)
-        #   sin disponibilidad → solo bloques ESTÁNDAR (preserva la grilla institucional)
-        base = _BLOQUES_VALIDOS_AYUD.copy() if es_ayud else list(range(N_BLOQUES))
-        prof = datos.profesores.get(s.rut_profesor) if s.rut_profesor else None
-        tiene_disp = s.afecta_disponibilidad and prof is not None and bool(prof.disponibilidad)
-        if tiene_disp:
-            disponibles = [b for b in base if b in prof.disponibilidad]
-        else:
-            disponibles = [b for b in base if b in SET_ESTANDAR]
-        rep_disponibles.append(disponibles)
+        # Bloques disponibles para este rep: EXACTAMENTE el mismo dominio que usa CP-SAT
+        # (disponibilidad_seccion ya filtra por duración 2h/3h, RD2 y RD7). Reutilizar la
+        # misma función garantiza que el GA nunca mueva una sección fuera de lo permitido.
+        rep_disponibles.append(sorted(disponibilidad_seccion(datos, s)))
 
         rep_es_prog_labt.append(
             s.codigo_curso == CURSO_PROGRAMACION and s.componente == TipoReunion.LABT
