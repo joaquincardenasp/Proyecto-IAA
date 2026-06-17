@@ -61,7 +61,7 @@ class SeccionRef(BaseModel):
 
 
 class ViolacionItem(BaseModel):
-    tipo: str           # "RD1", "RD3", "RD4", "RB1", ..., "RB5"
+    tipo: str           # "RD1", "RD3", "RD4", "RB1", ..., "RB4"
     descripcion: str    # label corto: "Tope de malla", "Conflicto de profesor", ...
     mensaje: str        # descripción completa legible para Francisca
     secciones: list[SeccionRef]

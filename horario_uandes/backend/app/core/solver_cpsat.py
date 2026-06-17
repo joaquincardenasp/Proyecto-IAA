@@ -125,18 +125,25 @@ def disponibilidad_seccion(
 ) -> set[int]:
     """
     Bloques en que una sección PUEDE dictarse:
+      - DURACIÓN: solo bloques cuyo tipo (2h/3h) coincide con duracion_bloque de la
+        sección. Una clase de 2h no puede ir en un bloque de 3h ni viceversa (RD6).
       - AYUD → solo desde 12:30 (RD7)
       - con disponibilidad declarada → bloques del profesor (estándar + helper)
-      - sin disponibilidad → solo bloques ESTÁNDAR (preserva la grilla institucional)
+      - sin disponibilidad → todos los bloques de su duración. La preferencia por la
+        grilla estándar NO se fuerza aquí (sería demasiado rígido para los cursos de 3h,
+        que solo tienen 2 bloques estándar): se maneja de forma blanda con el objetivo
+        de minimizar bloques helper (CP-SAT) y la penalización PESO_BLOQUE_HELPER (GA).
     """
     es_ayud = s.componente == TipoReunion.AYUD
+    dur = getattr(s, "duracion_bloque", "2h")
     base = {b for b in range(N_BLOQUES)
-            if not es_ayud or b not in _BLOQUES_PROHIBIDOS_AYUD}
+            if TODOS_BLOQUES[b].tipo == dur
+            and (not es_ayud or b not in _BLOQUES_PROHIBIDOS_AYUD)}
     prof = datos.profesores.get(s.rut_profesor) if s.rut_profesor else None
     tiene = usar_rd2 and s.afecta_disponibilidad and prof is not None and bool(prof.disponibilidad)
     if tiene:
         return {b for b in base if b in prof.disponibilidad}
-    return {b for b in base if b in SET_ESTANDAR}
+    return base
 
 
 # ---------------------------------------------------------------------------

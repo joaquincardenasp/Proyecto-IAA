@@ -24,7 +24,6 @@ from ..core.blocks import TODOS_BLOQUES
 from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
 from ..core.parser import cargar_datos
-from ..core.parser_historico import leer_historico
 from ..core.reporter import generar_reporte_detallado
 from ..core.solver_cpsat import resolver_con_fallback          # ← usa el fallback
 from ..core.solver_ga import (
@@ -82,8 +81,7 @@ def _set_progress(msg: str) -> None:
 def _solve_sync(req: SolveRequest) -> None:
     try:
         _set_progress("Cargando datos…")
-        datos     = cargar_datos(INPUTS_DIR)
-        historico = leer_historico(INPUTS_DIR)
+        datos = cargar_datos(INPUTS_DIR)
         _state["datos"] = datos
 
         _set_progress("Ejecutando CP-SAT…")
@@ -115,7 +113,6 @@ def _solve_sync(req: SolveRequest) -> None:
         resultado_ga = ejecutar_ga(
             datos,
             resultado_cpsat.asignaciones,
-            historico,
             n_generaciones=req.n_generaciones,
             pop_size=req.pop_size,
             seed=req.seed,
@@ -124,7 +121,7 @@ def _solve_sync(req: SolveRequest) -> None:
         asignaciones = resultado_ga.asignaciones
 
         _set_progress("Calculando métricas y reporte…")
-        ctx           = construir_contexto(datos, resultado_cpsat.asignaciones, historico)
+        ctx           = construir_contexto(datos, resultado_cpsat.asignaciones)
         fitness_cpsat = calcular_fitness(encode(resultado_cpsat.asignaciones, ctx), ctx)[0]
         fitness_ga    = resultado_ga.fitness_final
         mejora_pct    = (
@@ -133,7 +130,7 @@ def _solve_sync(req: SolveRequest) -> None:
         )
         n_bloques_totales = sum(len(b) for b in asignaciones.values())
 
-        reporte_raw = generar_reporte_detallado(datos, asignaciones, historico)
+        reporte_raw = generar_reporte_detallado(datos, asignaciones)
 
         pen_rb = reporte_raw["resumen"]["penalizacion_por_rb"]
         metricas_dict = {
@@ -284,7 +281,17 @@ async def upload_files(files: list[UploadFile] = File(...)):
             if not nombre:
                 continue
             contenido = await f.read()
-            (INPUTS_DIR / nombre).write_bytes(contenido)
+            try:
+                (INPUTS_DIR / nombre).write_bytes(contenido)
+            except PermissionError:
+                # En Windows, un archivo abierto en Excel (o de solo lectura) queda
+                # bloqueado para escritura. Mensaje claro en vez de un 500 genérico.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"No se pudo guardar '{nombre}': el archivo está abierto en "
+                            f"Excel u otro programa, o es de solo lectura. Ciérralo e "
+                            f"intenta de nuevo."),
+                )
             saved.append(nombre)
         if not saved:
             raise HTTPException(status_code=400, detail="No se recibió ningún archivo válido")

@@ -6,9 +6,6 @@ Restricciones blandas (RB):
   RB2  (80): Prof jornada no asignado en 8:30 ni 17:30
   RB3  (50): Distintos componentes del mismo curso en días distintos
   RB4  (50): Máximo 1 bloque del mismo componente por curso por día
-  RB5  (60): Proximidad histórica — preferir bloques de semestres anteriores
-             (peso aumentado respecto al PRD: cursos de primer semestre mantienen
-              horario estable entre generaciones — ej. ING1100 y Plan Común)
 
 Pesos configurables en PESOS al inicio del archivo.
 """
@@ -22,8 +19,13 @@ from typing import Any
 
 from deap import base, creator, tools
 
+<<<<<<< HEAD
 from .blocks import BLOQUES_1H, BLOQUES_2H_SET, MATRIZ_SOLAPAMIENTO, N_BLOQUES, SET_ESTANDAR, TODOS_BLOQUES
+=======
+from .blocks import MATRIZ_SOLAPAMIENTO, SET_ESTANDAR, TODOS_BLOQUES
+>>>>>>> main
 from .models import DatosProblema, TipoProfesor, TipoReunion
+from .solver_cpsat import disponibilidad_seccion
 
 # ---------------------------------------------------------------------------
 # Configuración de pesos
@@ -34,7 +36,6 @@ PESOS: dict[str, int] = {
     "RB2":  80,
     "RB3":  50,
     "RB4":  50,
-    "RB5":  60,
 }
 
 # Preferencia por la grilla estándar: cada bloque helper (no estándar) usado suma
@@ -55,11 +56,6 @@ def _hora_a_min(hora: str) -> int:
 
 _MIN_12_30 = _hora_a_min("12:30")
 _HORAS_EXTREMAS = {"8:30", "17:30"}
-
-_BLOQUES_VALIDOS_AYUD: list[int] = [
-    i for i, b in enumerate(TODOS_BLOQUES)
-    if _hora_a_min(b.hora_inicio) >= _MIN_12_30
-]
 
 _DIA_DEL_BLOQUE: list[str] = [b.dia.value for b in TODOS_BLOQUES]
 _HORA_INICIO_DEL_BLOQUE: list[str] = [b.hora_inicio for b in TODOS_BLOQUES]
@@ -82,7 +78,6 @@ class GAContexto:
     rep_disponibles: list[list[int]]          # índices de bloques válidos por rep
     conflictos: list[set[int]]                # rep_idx → set de rep_idx conflictivos
     reps_por_curso: dict[str, dict[str, list[int]]]  # {codigo: {comp_str: [rep_idx, ...]}}
-    historico_rep: list[set[int]]             # bloques históricos por rep
     rep_seccion_ids: list[list[str]]          # todos los sec_id del grupo del rep
     rep_es_prog_labt: list[bool]              # RB1: es ING1103-LABT
     datos: DatosProblema
@@ -92,7 +87,6 @@ class GAContexto:
 def construir_contexto(
     datos: DatosProblema,
     asignaciones: dict[str, list[int]],
-    historico: dict[str, dict[str, set[int]]],
 ) -> GAContexto:
     """Construye el contexto del GA a partir de la solución CP-SAT."""
     sec_by_id = {s.id: s for s in datos.secciones}
@@ -142,6 +136,7 @@ def construir_contexto(
         )
         rep_es_jornada.append(es_jornada)
 
+<<<<<<< HEAD
         # Bloques disponibles para este rep (debe coincidir con el dominio de CP-SAT):
         #   AYUD → solo desde 12:30 (RD7)
         #   con disponibilidad declarada → bloques del profesor (estándar + helper)
@@ -166,6 +161,12 @@ def construir_contexto(
             ])
         else:
             rep_disponibles.append([b for b in disponibles_base if b not in BLOQUES_1H])
+=======
+        # Bloques disponibles para este rep: EXACTAMENTE el mismo dominio que usa CP-SAT
+        # (disponibilidad_seccion ya filtra por duración 2h/3h, RD2 y RD7). Reutilizar la
+        # misma función garantiza que el GA nunca mueva una sección fuera de lo permitido.
+        rep_disponibles.append(sorted(disponibilidad_seccion(datos, s)))
+>>>>>>> main
 
         rep_es_prog_labt.append(
             s.codigo_curso == CURSO_PROGRAMACION and s.componente == TipoReunion.LABT
@@ -259,13 +260,6 @@ def construir_contexto(
                 elif not mismo_curso:
                     _add(ri, rj)            # cap>1: solo cursos distintos (aprox. binaria)
 
-    # Histórico por rep
-    historico_rep: list[set[int]] = []
-    for rep_id in reps_list:
-        s = sec_by_id[rep_id]
-        hist = historico.get(s.codigo_curso, {})
-        historico_rep.append(hist.get(s.componente.value, set()))
-
     return GAContexto(
         reps=reps_list,
         rep_n_blocks=rep_n_blocks,
@@ -275,7 +269,6 @@ def construir_contexto(
         rep_disponibles=rep_disponibles,
         conflictos=conflictos,
         reps_por_curso=dict(reps_por_curso),
-        historico_rep=historico_rep,
         rep_seccion_ids=rep_seccion_ids,
         rep_es_prog_labt=rep_es_prog_labt,
         datos=datos,
@@ -395,15 +388,6 @@ def calcular_fitness(individuo: list[list[int]], ctx: GAContexto) -> tuple[float
             if count > 1:
                 penalty += (count - 1) * PESOS["RB4"]
 
-    # RB5: Proximidad histórica
-    for i in range(len(ctx.reps)):
-        hist = ctx.historico_rep[i]
-        if not hist:
-            continue
-        for b in individuo[i]:
-            if b not in hist:
-                penalty += PESOS["RB5"]
-
     # Preferencia por la grilla estándar: penalizar cada bloque helper usado.
     for i in range(len(ctx.reps)):
         for b in individuo[i]:
@@ -498,7 +482,6 @@ class ResultadoGA:
 def ejecutar_ga(
     datos: DatosProblema,
     asignaciones_cpsat: dict[str, list[int]],
-    historico: dict[str, dict[str, set[int]]],
     n_generaciones: int = 200,
     pop_size: int = 40,
     cxpb: float = 0.5,
@@ -508,7 +491,7 @@ def ejecutar_ga(
     """Ejecuta el GA de mejora de restricciones blandas."""
     random.seed(seed)
 
-    ctx = construir_contexto(datos, asignaciones_cpsat, historico)
+    ctx = construir_contexto(datos, asignaciones_cpsat)
 
     # Tipos DEAP — crear solo si no existen todavía en el módulo global
     if not hasattr(creator, "FitnessMin"):

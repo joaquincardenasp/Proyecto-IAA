@@ -12,61 +12,70 @@ const DIAS: { key: Dia; label: string }[] = [
   { key: 'V', label: 'Viernes' },
 ]
 
-// Inicios de bloque posibles, en orden cronológico (minutos desde medianoche).
-const HORA_ORDEN: Record<string, number> = {
-  '8:30': 510, '9:30': 570, '10:30': 630, '11:30': 690, '12:30': 750,
-  '13:30': 810, '14:30': 870, '15:30': 930, '16:30': 990, '17:30': 1050,
-}
-// Franjas estándar: siempre visibles aunque no tengan clases (grilla institucional).
-const FRANJAS_ESTANDAR = ['8:30', '10:30', '12:30', '13:30', '15:30', '17:30']
-
-interface Franja { hora: string; label: string; helper: boolean }
-
-function fmtHora(h: string): string {
-  const [hh, mm] = h.split(':')
-  return `${hh.padStart(2, '0')}:${mm}`
-}
-
-// Construye las filas de la grilla: estándar siempre + cualquier inicio "helper"
-// (9:30, 14:30, 16:30, …) que realmente aparezca en los datos.
-function buildFranjas(secciones: SeccionAsignada[]): Franja[] {
-  const horas = new Set<string>(FRANJAS_ESTANDAR)
-  for (const sec of secciones)
-    for (const b of sec.bloques)
-      horas.add(b.hora_inicio)
-  return Array.from(horas)
-    .filter(h => h in HORA_ORDEN)
-    .sort((a, b) => HORA_ORDEN[a] - HORA_ORDEN[b])
-    .map(h => ({ hora: h, label: fmtHora(h), helper: !FRANJAS_ESTANDAR.includes(h) }))
-}
-
 const DIAS_LABEL: Record<Dia, string> = {
   L: 'Lunes', M: 'Martes', X: 'Miércoles', J: 'Jueves', V: 'Viernes',
 }
 
-// Estilo base por tipo (borde izquierdo + fondo + texto)
+// Sub-bloques de 50 minutos (estilo BANNER). Cada fila de la grilla es uno de estos.
+// `min` = minuto de inicio (para mapear los bloques de los cursos a filas).
+const SUB_BLOQUES: { inicio: string; fin: string; min: number }[] = [
+  { inicio: '08:30', fin: '09:20', min: 510 },
+  { inicio: '09:30', fin: '10:20', min: 570 },
+  { inicio: '10:30', fin: '11:20', min: 630 },
+  { inicio: '11:30', fin: '12:20', min: 690 },
+  { inicio: '12:30', fin: '13:20', min: 750 },
+  { inicio: '13:30', fin: '14:20', min: 810 },
+  { inicio: '14:30', fin: '15:20', min: 870 },
+  { inicio: '15:30', fin: '16:20', min: 930 },
+  { inicio: '16:30', fin: '17:20', min: 990 },
+  { inicio: '17:30', fin: '18:20', min: 1050 },
+  { inicio: '18:30', fin: '19:20', min: 1110 },
+]
+const SUB_MIN = SUB_BLOQUES.map(s => s.min)
+const ROW_H = 46          // altura de cada fila (sub-bloque) en px
+const HEADER_H = 36       // altura del encabezado (h-9)
+
+function toMin(h: string): number {
+  const [hh, mm] = h.split(':').map(Number)
+  return hh * 60 + mm
+}
+/** Fila (índice de sub-bloque) en que inicia un bloque; -1 si no calza. */
+function rowOf(horaInicio: string): number {
+  return SUB_MIN.indexOf(toMin(horaInicio))
+}
+/** Cuántos sub-bloques de 50 min cubre un bloque (2h → 2, 3h → 3). */
+function spanOf(horaInicio: string, horaFin: string): number {
+  const a = toMin(horaInicio), b = toMin(horaFin)
+  return SUB_MIN.filter(m => m >= a && m < b).length || 1
+}
+
+// Color coding por tipo: cátedra = negro, ayudantía = verde, lab/taller = morado.
 const TIPO_CARD: Record<TipoSeccion, string> = {
-  CLAS: 'bg-red-50   border-l-[3px] border-red-700   text-red-950',
-  AYUD: 'bg-gray-100 border-l-[3px] border-gray-500  text-gray-900',
-  LABT: 'bg-stone-100 border-l-[3px] border-stone-600 text-stone-900',
+  CLAS: 'bg-gray-50    border-l-[3px] border-gray-900   text-gray-900',
+  AYUD: 'bg-green-50   border-l-[3px] border-green-600  text-green-950',
+  LABT: 'bg-purple-50  border-l-[3px] border-purple-600 text-purple-950',
 }
-
-// Color del separador horizontal entre secciones paralelas
+// Separador horizontal entre secciones paralelas
 const TIPO_DIVIDER: Record<TipoSeccion, string> = {
-  CLAS: 'border-red-200',
-  AYUD: 'border-gray-300',
-  LABT: 'border-stone-300',
+  CLAS: 'border-gray-300',
+  AYUD: 'border-green-200',
+  LABT: 'border-purple-200',
 }
-
 const TIPO_TAG: Record<TipoSeccion, string> = {
-  CLAS: 'bg-red-100  text-red-800',
-  AYUD: 'bg-gray-200 text-gray-700',
-  LABT: 'bg-stone-200 text-stone-700',
+  CLAS: 'bg-gray-200   text-gray-800',
+  AYUD: 'bg-green-100  text-green-800',
+  LABT: 'bg-purple-100 text-purple-800',
 }
 const TIPO_LABEL: Record<TipoSeccion, string> = {
   CLAS: 'Cátedra',
   AYUD: 'Ayudantía',
   LABT: 'Lab / Taller',
+}
+// Color del botón de filtro activo por tipo
+const TIPO_BTN_ACTIVE: Record<TipoSeccion, string> = {
+  CLAS: 'bg-gray-900   text-white',
+  AYUD: 'bg-green-600  text-white',
+  LABT: 'bg-purple-600 text-white',
 }
 
 const CARRERAS = ['Plan Común', 'ICI', 'IOC', 'ICE', 'ICC', 'ICA', 'ICQ']
@@ -91,29 +100,6 @@ function compareSems(a: string, b: string): number {
   return na !== nb ? na - nb : sa.localeCompare(sb)
 }
 
-// ── Agrupación de celdas ──────────────────────────────────────────────────────
-//
-// Agrupa las secciones de una celda por codigo_curso preservando orden
-// de primera aparición.
-//
-//   Mismo curso → un grupo  → indicador visual de paralelismo
-//   Cursos distintos → grupos distintos → apilados verticalmente
-
-function groupByCourse(secs: SeccionAsignada[]): SeccionAsignada[][] {
-  const groups: SeccionAsignada[][] = []
-  const index  = new Map<string, number>()
-  for (const sec of secs) {
-    const i = index.get(sec.codigo)
-    if (i !== undefined) {
-      groups[i].push(sec)
-    } else {
-      index.set(sec.codigo, groups.length)
-      groups.push([sec])
-    }
-  }
-  return groups
-}
-
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
 interface Filters {
@@ -123,36 +109,96 @@ interface Filters {
   texto:    string
 }
 
-type GridMap = Map<Dia, Map<string, SeccionAsignada[]>>
+// Una "ubicación" en la grilla: un curso en un día, desde startRow ocupando `span`
+// filas. `sections` agrupa las secciones paralelas del mismo curso (mismo bloque).
+// `lane`/`lanes` posicionan lado a lado las ubicaciones que se solapan en el tiempo.
+interface Placement {
+  key:      string
+  sections: SeccionAsignada[]
+  startRow: number
+  span:     number
+  lane:     number
+  lanes:    number
+}
 
-// ── buildGrid ─────────────────────────────────────────────────────────────────
+// ── Construcción de ubicaciones por día ─────────────────────────────────────────
 
-function buildGrid(secciones: SeccionAsignada[], filters: Filters, franjas: Franja[]): GridMap {
-  const grid: GridMap = new Map()
-  for (const d of DIAS) {
-    const dmap = new Map<string, SeccionAsignada[]>()
-    for (const f of franjas) dmap.set(f.hora, [])
-    grid.set(d.key, dmap)
-  }
-
+function aplicarFiltros(secciones: SeccionAsignada[], filters: Filters): SeccionAsignada[] {
   const q = filters.texto.toLowerCase()
-
-  for (const sec of secciones) {
-    if (filters.tipo && sec.tipo !== filters.tipo) continue
-    if (filters.carrera && !sec.carreras.includes(filters.carrera)) continue
+  return secciones.filter(sec => {
+    if (filters.tipo && sec.tipo !== filters.tipo) return false
+    if (filters.carrera && !sec.carreras.includes(filters.carrera)) return false
     if (filters.carrera && filters.semestre) {
       const sems = getSemestresForCarrera(sec, filters.carrera)
-      if (!sems.includes(filters.semestre)) continue
+      if (!sems.includes(filters.semestre)) return false
     }
     if (q && ![sec.codigo, sec.titulo, sec.profesor, sec.seccion]
-        .join(' ').toLowerCase().includes(q)) continue
+        .join(' ').toLowerCase().includes(q)) return false
+    return true
+  })
+}
 
-    for (const b of sec.bloques) {
-      const cell = grid.get(b.dia as Dia)?.get(b.hora_inicio)
-      if (cell) cell.push(sec)
+// Asigna carriles (columnas lado a lado) a ubicaciones que se solapan en filas.
+// Las que no se solapan con nadie quedan en lane 0 con lanes 1 (ancho completo).
+function asignarCarriles(placements: Placement[]): void {
+  const orden = [...placements].sort((a, b) =>
+    a.startRow - b.startRow || (a.startRow + a.span) - (b.startRow + b.span))
+
+  // Agrupar en clusters de ubicaciones que se solapan (directa o transitivamente)
+  let cluster: Placement[] = []
+  let clusterEnd = -1
+  const clusters: Placement[][] = []
+  for (const p of orden) {
+    if (cluster.length && p.startRow < clusterEnd) {
+      cluster.push(p)
+      clusterEnd = Math.max(clusterEnd, p.startRow + p.span)
+    } else {
+      if (cluster.length) clusters.push(cluster)
+      cluster = [p]
+      clusterEnd = p.startRow + p.span
     }
   }
-  return grid
+  if (cluster.length) clusters.push(cluster)
+
+  // Dentro de cada cluster: first-fit por carril; lanes = carriles usados
+  for (const cl of clusters) {
+    const laneEnd: number[] = []   // fila final ocupada por cada carril
+    for (const p of cl) {
+      let li = laneEnd.findIndex(end => end <= p.startRow)
+      if (li === -1) { li = laneEnd.length; laneEnd.push(0) }
+      p.lane = li
+      laneEnd[li] = p.startRow + p.span
+    }
+    for (const p of cl) p.lanes = laneEnd.length
+  }
+}
+
+function buildPlacements(filtered: SeccionAsignada[]): Record<Dia, Placement[]> {
+  const out = {} as Record<Dia, Placement[]>
+  for (const d of DIAS) {
+    const porKey = new Map<string, Placement>()
+    const orden: string[] = []
+    for (const sec of filtered) {
+      for (const b of sec.bloques) {
+        if (b.dia !== d.key) continue
+        const startRow = rowOf(b.hora_inicio)
+        if (startRow < 0) continue
+        const span = spanOf(b.hora_inicio, b.hora_fin)
+        const key  = `${sec.codigo}|${startRow}|${span}`
+        let p = porKey.get(key)
+        if (!p) {
+          p = { key: `${d.key}-${key}`, sections: [], startRow, span, lane: 0, lanes: 1 }
+          porKey.set(key, p)
+          orden.push(key)
+        }
+        if (!p.sections.some(s => s.id === sec.id)) p.sections.push(sec)
+      }
+    }
+    const placements = orden.map(k => porKey.get(k)!)
+    asignarCarriles(placements)
+    out[d.key] = placements
+  }
+  return out
 }
 
 // ── Componente principal ──────────────────────────────────────────────────────
@@ -174,17 +220,15 @@ export default function HorarioGrid({ secciones }: Props) {
     return Array.from(set).sort(compareSems)
   }, [secciones, filters.carrera])
 
-  const franjas = useMemo(() => buildFranjas(secciones), [secciones])
-  const grid  = useMemo(() => buildGrid(secciones, filters, franjas), [secciones, filters, franjas])
-  const total = useMemo(() => {
-    let n = 0
-    grid.forEach(dm => dm.forEach(arr => { n += arr.length }))
-    return n
-  }, [grid])
+  const filtered   = useMemo(() => aplicarFiltros(secciones, filters), [secciones, filters])
+  const placements = useMemo(() => buildPlacements(filtered), [filtered])
+  const total      = filtered.length
 
   function setCarrera(car: string) {
     setFilters(f => ({ ...f, carrera: car, semestre: '' }))
   }
+
+  const bodyHeight = SUB_BLOQUES.length * ROW_H
 
   return (
     <div className="flex flex-col gap-5">
@@ -236,10 +280,7 @@ export default function HorarioGrid({ secciones }: Props) {
                 onClick={() => setFilters(f => ({ ...f, tipo: t as TipoSeccion | '' }))}
                 className={`px-2.5 py-1 text-xs rounded transition-colors
                   ${filters.tipo === t
-                    ? t === ''     ? 'bg-gray-800 text-white'
-                    : t === 'CLAS' ? 'bg-red-700 text-white'
-                    : t === 'AYUD' ? 'bg-gray-500 text-white'
-                                   : 'bg-stone-600 text-white'
+                    ? t === '' ? 'bg-gray-800 text-white' : TIPO_BTN_ACTIVE[t]
                     : 'border border-gray-200 text-gray-500 hover:border-gray-300'
                   }`}
               >
@@ -272,47 +313,76 @@ export default function HorarioGrid({ secciones }: Props) {
         </div>
       </div>
 
-      {/* ── Grilla ─────────────────────────────────────────────────────────── */}
-      <div className="overflow-x-auto rounded-lg border border-gray-200">
-        <table className="w-full border-collapse bg-white text-sm" style={{ minWidth: 860 }}>
-          <thead>
-            <tr>
-              <th className="w-20 bg-gray-800 text-white text-xs font-medium p-3 text-left">
-                Hora
-              </th>
-              {DIAS.map(d => (
-                <th key={d.key}
-                    className="bg-[#B71C1C] text-white text-xs font-semibold p-3 text-center w-1/5">
-                  {d.label}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {franjas.map((franja, fi) => (
-              <tr key={franja.hora}
-                  className={franja.helper ? 'bg-amber-50/40' : (fi % 2 === 0 ? 'bg-white' : 'bg-gray-50/60')}>
-                <td className="p-2 pr-3 text-right border-r border-gray-200 align-top">
-                  <span className={`text-xs font-medium ${franja.helper ? 'text-amber-600' : 'text-gray-400'}`}>
-                    {franja.label}
-                    {franja.helper && <span className="block text-[9px] text-amber-500">fuera de grilla</span>}
-                  </span>
-                </td>
-                {DIAS.map(d => {
-                  const secs = grid.get(d.key)?.get(franja.hora) ?? []
-                  return (
-                    <td key={d.key} className="p-1 align-top border-l border-gray-100">
-                      {secs.length > 0
-                        ? <CellContent secs={secs} selected={selected} onSelect={setSelected} />
-                        : <div className="h-8" />
-                      }
-                    </td>
-                  )
-                })}
-              </tr>
+      {/* ── Grilla de sub-bloques ──────────────────────────────────────────── */}
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+        <div className="flex" style={{ minWidth: 900 }}>
+
+          {/* Columna de horas */}
+          <div className="w-24 shrink-0 border-r border-gray-200">
+            <div style={{ height: HEADER_H }} className="bg-gray-800" />
+            {SUB_BLOQUES.map((sb, i) => (
+              <div
+                key={sb.inicio}
+                style={{ height: ROW_H }}
+                className={`px-2 flex flex-col justify-center items-end border-t border-gray-100
+                  ${i % 2 === 1 ? 'bg-gray-50/50' : ''}`}
+              >
+                <span className="text-[11px] font-semibold text-gray-600 tabular-nums leading-none">
+                  {sb.inicio}
+                </span>
+                <span className="text-[10px] text-gray-400 tabular-nums leading-none mt-0.5">
+                  {sb.fin}
+                </span>
+              </div>
             ))}
-          </tbody>
-        </table>
+          </div>
+
+          {/* Columnas por día */}
+          {DIAS.map(d => (
+            <div key={d.key} className="flex-1 min-w-0 border-l border-gray-200 first:border-l-0">
+              <div
+                style={{ height: HEADER_H }}
+                className="bg-[#B71C1C] text-white text-xs font-semibold flex items-center justify-center"
+              >
+                {d.label}
+              </div>
+              <div className="relative" style={{ height: bodyHeight }}>
+                {/* Líneas de fondo por sub-bloque */}
+                {SUB_BLOQUES.map((_, i) => (
+                  <div
+                    key={i}
+                    style={{ top: i * ROW_H, height: ROW_H }}
+                    className={`absolute inset-x-0 border-t border-gray-100
+                      ${i % 2 === 1 ? 'bg-gray-50/50' : ''}`}
+                  />
+                ))}
+                {/* Ubicaciones (clases) */}
+                {placements[d.key].map(p => (
+                  <div
+                    key={p.key}
+                    className="absolute p-0.5"
+                    style={{
+                      top:    p.startRow * ROW_H,
+                      height: p.span * ROW_H,
+                      left:   `${(p.lane / p.lanes) * 100}%`,
+                      width:  `${100 / p.lanes}%`,
+                    }}
+                  >
+                    {p.sections.length === 1 ? (
+                      <SeccionCard
+                        sec={p.sections[0]}
+                        isSelected={selected?.id === p.sections[0].id}
+                        onClick={() => setSelected(p.sections[0] === selected ? null : p.sections[0])}
+                      />
+                    ) : (
+                      <GroupBlock group={p.sections} selected={selected} onSelect={setSelected} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* ── Detalle ────────────────────────────────────────────────────────── */}
@@ -328,58 +398,19 @@ export default function HorarioGrid({ secciones }: Props) {
             {TIPO_LABEL[t]}
           </span>
         ))}
-        <span className="text-gray-400">· Haz clic en una sección para ver el detalle</span>
+        <span className="text-gray-400">
+          · Cada fila es un sub-bloque de 50 min; la altura del curso indica su duración
+        </span>
       </div>
-    </div>
-  )
-}
-
-// ── CellContent ───────────────────────────────────────────────────────────────
-//
-// Lógica de renderizado de una celda:
-//   1. Agrupa secciones por curso (groupByCourse)
-//   2. Grupo de 1 sección  → SeccionCard normal
-//   3. Grupo de N secciones del mismo curso → GroupBlock (indicador de paralelismo)
-//   4. Los grupos se apilan verticalmente
-
-function CellContent({
-  secs, selected, onSelect,
-}: {
-  secs:     SeccionAsignada[]
-  selected: SeccionAsignada | null
-  onSelect: (sec: SeccionAsignada | null) => void
-}) {
-  const groups = groupByCourse(secs)
-
-  return (
-    <div className="space-y-0.5">
-      {groups.map((group, gi) =>
-        group.length === 1 ? (
-          <SeccionCard
-            key={group[0].id}
-            sec={group[0]}
-            isSelected={selected?.id === group[0].id}
-            onClick={() => onSelect(group[0] === selected ? null : group[0])}
-          />
-        ) : (
-          <GroupBlock
-            key={gi}
-            group={group}
-            selected={selected}
-            onSelect={onSelect}
-          />
-        )
-      )}
     </div>
   )
 }
 
 // ── GroupBlock ────────────────────────────────────────────────────────────────
 //
-// Secciones paralelas del MISMO curso.
-// El contenedor comparte el borde izquierdo continuo (visualmente conectado).
+// Secciones paralelas del MISMO curso (mismo bloque). Borde izquierdo continuo.
 // Primera sección: código-sección, título, profesor + tag "N paralelas".
-// Secciones siguientes: solo código-sección y profesor (el título se omite).
+// Secciones siguientes: solo código-sección y profesor.
 
 function GroupBlock({
   group, selected, onSelect,
@@ -391,12 +422,12 @@ function GroupBlock({
   const tipo = group[0].tipo
 
   return (
-    <div className={`rounded overflow-hidden ${TIPO_CARD[tipo]}`}>
+    <div className={`h-full rounded overflow-y-auto flex flex-col ${TIPO_CARD[tipo]}`}>
       {group.map((sec, idx) => (
         <button
           key={sec.id}
           onClick={() => onSelect(sec === selected ? null : sec)}
-          className={`w-full text-left p-1.5 text-xs transition-all
+          className={`w-full text-left px-1.5 py-1 text-xs transition-all shrink-0
             ${idx > 0 ? `border-t ${TIPO_DIVIDER[tipo]}` : ''}
             ${selected?.id === sec.id
               ? 'ring-1 ring-inset ring-gray-400 shadow-sm'
@@ -404,24 +435,22 @@ function GroupBlock({
             }
           `}
         >
-          {/* Primera sección: info completa + indicador de paralelismo */}
           {idx === 0 ? (
             <>
               <span className="font-semibold block truncate leading-tight">
                 {sec.codigo}-{sec.seccion}
               </span>
-              <span className="block truncate text-[10px] opacity-75 mt-0.5 leading-tight">
+              <span className="block truncate text-[10px] opacity-75 leading-tight">
                 {sec.titulo}
               </span>
               <span className="block truncate text-[10px] opacity-55 leading-tight">
                 {sec.profesor}
               </span>
-              <span className="block text-[10px] text-gray-400 mt-1 leading-tight">
+              <span className="block text-[10px] opacity-50 mt-0.5 leading-tight">
                 ┄&nbsp;{group.length} secciones paralelas
               </span>
             </>
           ) : (
-            /* Secciones siguientes: solo sección + profesor (título ya mostrado) */
             <>
               <span className="font-semibold block truncate leading-tight">
                 {sec.codigo}-{sec.seccion}
@@ -438,7 +467,7 @@ function GroupBlock({
 }
 
 // ── SeccionCard ───────────────────────────────────────────────────────────────
-// Sección individual (sin paralelas en la misma celda).
+// Sección individual, centrada verticalmente dentro del span de filas que ocupa.
 
 function SeccionCard({
   sec, onClick, isSelected,
@@ -450,15 +479,16 @@ function SeccionCard({
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left rounded p-1.5 text-xs transition-all
+      className={`h-full w-full text-left rounded px-1.5 py-1 text-xs transition-all
+        flex flex-col justify-center overflow-hidden
         ${TIPO_CARD[sec.tipo]}
-        ${isSelected ? 'ring-1 ring-offset-1 ring-gray-400 shadow-sm' : 'hover:brightness-95'}
+        ${isSelected ? 'ring-1 ring-inset ring-gray-400 shadow-sm' : 'hover:brightness-95'}
       `}
     >
       <span className="font-semibold block truncate leading-tight">
         {sec.codigo}-{sec.seccion}
       </span>
-      <span className="block truncate text-[10px] opacity-75 mt-0.5 leading-tight">
+      <span className="block truncate text-[10px] opacity-75 leading-tight">
         {sec.titulo}
       </span>
       <span className="block truncate text-[10px] opacity-55 leading-tight">
