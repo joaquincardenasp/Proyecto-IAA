@@ -42,7 +42,12 @@ Solo se procesan las filas con **`CURSO MANDANTE` = "SI"**. Por cada fila:
 | Profesor cátedra | `RUT PROFESOR 1` | normalizado (sin puntos/espacios) |
 | Profesor lab | `RUT PROFESOR LABT` | si existe |
 
-**Creación de secciones** (una `Seccion` por componente con horas > 0):
+**Secciones fuera de scope:** las filas cuya `SECCIONES` es una **letra** (B, C, …) en vez
+de un número son cupos de desborde (cuando no entra todo el curso en una sala/lab). **No se
+programan** (indicación de la encargada curricular); el resto de la fila —curso, profesor,
+semestre— sí se registra.
+
+**Creación de secciones** (una `Seccion` por componente con horas > 0, solo secciones numéricas):
 
 - **CLAS** si `Clases A PROGRAMAR > 0` → profesor = `RUT PROFESOR 1`, `afecta_disponibilidad=True` (si hay RUT).
 - **AYUD** si `Ayudantías PROGRAMAR > 0` → profesor nominal = `RUT PROFESOR 1` (solo display), `afecta_disponibilidad=False` (la dicta un TA).
@@ -53,6 +58,11 @@ Solo se procesan las filas con **`CURSO MANDANTE` = "SI"**. Por cada fila:
 **Cálculo de bloques necesarios:** `ceil(horas/2)` (bloques de 2h), o `1` para distribución
 "3"/"3-juntas". Un mismo curso en varias filas (distintos planes) **acumula semestres**
 (unión de sets); las secciones se crean una sola vez por `(codigo, seccion, componente)`.
+
+**Duración de bloque por sección** (`duracion_bloque`): `"3h"` solo si la distribución es
+`"3"/"3-juntas"` y el componente tiene ≥3 horas (o un AYUD/LABT de 3 horas seguidas); en todo
+otro caso `"2h"` (incluido `"2+1"`, que en v1 se trata como 2h). El solver solo asigna a la
+sección bloques de **su** duración (ver RD6).
 
 ### 1.3 Tipo de profesor y disponibilidad
 
@@ -123,7 +133,8 @@ mismo curso donde la disponibilidad lo permite. No hay agrupación previa.
 
 | ID | Qué verifica | Estado / detalle |
 |----|--------------|------------------|
-| **RD2 — Disponibilidad de profesor** | Cada sección solo puede ir en bloques donde su profesor está disponible. | **Activa y dura.** Implementada como el **dominio** de cada variable (`disponibilidad_seccion`). JORNADA = todos los bloques estándar; HONORARIO = sus bloques declarados. **Se respeta por completo**: si no hay bloque válido, el modelo es INFEASIBLE. |
+| **RD2 — Disponibilidad de profesor** | Cada sección solo puede ir en bloques donde su profesor está disponible. | **Activa y dura.** Implementada como el **dominio** de cada variable (`disponibilidad_seccion`). JORNADA = todos los bloques de su duración; HONORARIO = sus bloques declarados. **Se respeta por completo**: si no hay bloque válido, el modelo es INFEASIBLE. |
+| **RD6 — Duración del bloque** | Una sección solo usa bloques cuyo tipo (2h/3h) coincide con su `duracion_bloque`. Una clase de 2h no puede caer en un bloque de 3h ni viceversa. | **Activa y dura.** Implementada en el **dominio** (`disponibilidad_seccion` filtra por `TODOS_BLOQUES[b].tipo == s.duracion_bloque`). Solo las clases "3-juntas"/de 3h usan bloques de 3h. |
 | **Intra-sección** | Los bloques de una misma sección no se solapan entre sí. | Activa. |
 | **NRC — Componentes de la misma sección** | CLAS-k, AYUD-k y LABT-k de la **misma sección** (mismo NRC) no se solapan (el alumno asiste a los tres). | Activa. Se agrupa por `(codigo, seccion)`. |
 | **RD1 — Sin topes de malla** | Secciones de **cursos distintos** del mismo `(carrera, semestre)` no se solapan. | Activa y dura. Secciones del **mismo** curso quedan exentas (pueden ir paralelas). |
@@ -137,8 +148,8 @@ estándar; las que sí tienen disponibilidad pueden usar helpers, pero solo cuan
 disponibilidad lo obliga.
 
 **Verificación independiente** (`verificar_topes`, `verificar_rd3`, `verificar_rd4`,
-`verificar_intra`): re-chequean la solución. En la corrida completa (299 secciones,
-7 carreras) el resultado es `topes=0, RD3=0, RD4=0, intra=0`.
+`verificar_intra`): re-chequean la solución. En la corrida completa (293 secciones
+programables, 7 carreras) el resultado es `topes=0, RD3=0, RD4=0, intra=0`.
 
 ### Resumen de las preguntas concretas
 
@@ -169,8 +180,10 @@ cada sección respeta RD2.
 | **RB2** | 80 | Profesor JORNADA asignado a un bloque extremo (inicio 8:30 ó 17:30). Solo cuenta si la sección `afecta_disponibilidad` (no penaliza secciones de TA). |
 | **RB3** | 50 | Componentes distintos del mismo curso (CLAS/AYUD/LABT) que comparten día. |
 | **RB4** | 50 | Más de un bloque del mismo componente/sección en el mismo día. |
-| **RB5** | 60 | Bloques que difieren del histórico de semestres anteriores (`inputs/historico/`). |
 | **Helper** | 40 (`PESO_BLOQUE_HELPER`) | Cada bloque helper (fuera de la grilla estándar) usado. |
+
+> Nota: la antigua RB5 (proximidad al histórico de semestres anteriores) fue **eliminada**
+> — el cliente confirmó que no es relevante. El sistema ya no lee `inputs/historico/`.
 
 Parámetros por defecto de `ejecutar_ga`: `n_generaciones=200`, `pop_size=40`, `cxpb=0.5`,
 `mutpb=0.4`, `seed=42`.
@@ -182,37 +195,36 @@ Parámetros por defecto de `ejecutar_ga`: `n_generaciones=200`, `pop_size=40`, `
 1. **Distribución "2+1"**: se trata como 2h (`ceil(horas/2)`). No se modela el bloque
    adicional de 1h.
 
-2. **Bloques de 3h no se fuerzan a slots de 3h (RD6 no implementada).** Un curso
-   "3-juntas" necesita 1 bloque, pero ese bloque puede caer en cualquier slot del dominio
-   (incluido uno de 2h). No hay restricción que lo obligue a un bloque tipo "3h"
-   (10:30-13:20 / 12:30-15:20).
-
-3. **Días distintos para secciones multi-bloque: no es restricción dura.** El intra-sección
+2. **Días distintos para secciones multi-bloque: no es restricción dura.** El intra-sección
    solo prohíbe **solapamiento**. Dos bloques de la misma sección en el mismo día pero sin
    solaparse (ej. 8:30 y 10:30) están permitidos por CP-SAT; el GA lo **desalienta** vía
    RB4 (blanda), pero no lo prohíbe.
 
-4. **Honorarios sin datos de disponibilidad** (ni en RESPUESTAS ni en FueraForms) se asumen
+3. **Honorarios sin datos de disponibilidad** (ni en RESPUESTAS ni en FueraForms) se asumen
    con **disponibilidad total**. Si en realidad tienen restricciones, no se respetan.
 
-5. **Salas con nombre desconocido** (un nombre en BBDD que no calza con ningún TIPO del
+4. **Salas con nombre desconocido** (un nombre en BBDD que no calza con ningún TIPO del
    inventario, ni siquiera tras canonicalizar) se tratan como **capacidad 1** (conservador).
 
-6. **RD4 en el GA es una aproximación binaria.** El CP-SAT modela la capacidad exacta por
+5. **RD4 en el GA es una aproximación binaria.** El CP-SAT modela la capacidad exacta por
    sub-bloque, pero el grafo de conflictos del GA solo conecta pares (para capacidad > 1
    conecta cursos distintos). La factibilidad de capacidad la garantiza el punto de partida
    de CP-SAT; un movimiento del GA podría, en teoría, exceder capacidad entre secciones del
    mismo curso (el `reporter` lo señalaría).
 
-7. **Disponibilidad estricta a nivel de bloque completo.** Un bloque se considera disponible
+6. **Disponibilidad estricta a nivel de bloque completo.** Un bloque se considera disponible
    solo si el profesor declaró **todos** sus sub-bloques. Una declaración parcial no habilita
    el bloque.
 
-8. **AYUD restringida a la grilla estándar desde 12:30**, sin considerar disponibilidad de
-   profesor (se asume TA). El RUT del profesor 1 se guarda solo para mostrar en el Excel.
+7. **AYUD** se dicta por un TA: no usa la disponibilidad de ningún profesor, solo se limita a
+   bloques de 2h desde las 12:30 (RD7). El RUT del profesor 1 se guarda solo para mostrar en
+   el Excel. La preferencia por la grilla estándar es blanda (objetivo / `PESO_BLOQUE_HELPER`).
 
-9. **Cursos sin semestre en malla** (ningún valor en Plan Común ni carreras) no participan
+8. **Cursos sin semestre en malla** (ningún valor en Plan Común ni carreras) no participan
    de RD1 (no generan topes), pero sí del resto de restricciones.
+
+9. **Secciones con letra** (B, C, …) son cupos de desborde y **no se programan** (fuera de
+   scope por decisión curricular).
 
 10. **Selección del Maestro**: si hay varios `Maestro*.xlsx` en `inputs/`, se usa el primero
     alfabéticamente (con aviso). No se valida que sea el "correcto".

@@ -423,6 +423,23 @@ def _calcular_bloques(horas: int) -> int:
     return max(1, math.ceil(horas / 2))
 
 
+def _duracion_bloque_clas(horas: int, distribucion: str) -> str:
+    """
+    Duración de bloque para CLAS. Solo '3h' cuando la distribución indica EXPLÍCITAMENTE
+    una única sesión de 3h ("3" o "3-juntas") y el curso tiene ≥3 horas. Las variantes
+    "2+1" (clase partida) se tratan como bloques de 2h en v1, aunque sumen 3 horas.
+    """
+    d = _norm(distribucion or "")
+    if d in ("3", "3-juntas") and horas >= 3:
+        return "3h"
+    return "2h"
+
+
+def _duracion_bloque(horas: int) -> str:
+    """Duración de bloque para AYUD/LABT: '3h' solo si el componente es de 3 horas seguidas."""
+    return "3h" if horas == 3 else "2h"
+
+
 # ---------------------------------------------------------------------------
 # Lectura de salas especiales
 # ---------------------------------------------------------------------------
@@ -655,6 +672,16 @@ def _leer_maestro(
             cursos[codigo].semestres_por_carrera.setdefault(carrera, set()).add(sem)
 
         # ── Crear secciones (una sola vez por id único) ───────────────────
+        # Las secciones identificadas con LETRA (B, C, …) en vez de número son cupos
+        # de desborde (ej. cuando no entra todo el curso en un laboratorio). Quedan
+        # FUERA DE SCOPE: no se programan (indicación de la encargada curricular).
+        if not seccion_id.isdigit():
+            advertencias.append(
+                f"[INFO] {codigo}-{seccion_id}: sección con letra (cupo de desborde) "
+                "→ fuera de scope, no se programa"
+            )
+            continue
+
         sec_base = f"{codigo}-{seccion_id}"
 
         if clas_h > 0:
@@ -669,6 +696,7 @@ def _leer_maestro(
                     rut_profesor=rut1,
                     afecta_disponibilidad=bool(rut1),
                     cantidad_bloques_necesarios=_calcular_bloques_clas(clas_h, distribucion),
+                    duracion_bloque=_duracion_bloque_clas(clas_h, distribucion),
                 ))
 
         if ayud_h > 0:
@@ -683,6 +711,7 @@ def _leer_maestro(
                     rut_profesor=rut1,           # nominal; la dicta un TA
                     afecta_disponibilidad=False,  # AYUD nunca afecta disponibilidad
                     cantidad_bloques_necesarios=_calcular_bloques(ayud_h),
+                    duracion_bloque=_duracion_bloque(ayud_h),
                 ))
 
         if lab_h > 0:
@@ -706,6 +735,7 @@ def _leer_maestro(
                     rut_profesor=prof_lab,
                     afecta_disponibilidad=afecta_lab,
                     cantidad_bloques_necesarios=_calcular_bloques(lab_h),
+                    duracion_bloque=_duracion_bloque(lab_h),
                 ))
 
     for w in advertencias:

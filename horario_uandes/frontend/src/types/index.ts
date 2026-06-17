@@ -39,7 +39,7 @@ export interface SeccionRef {
 }
 
 export interface ViolacionItem {
-  tipo: string          // "RD1" | "RD3" | "RD4" | "RB1" | ... | "RB5"
+  tipo: string          // "RD1" | "RD3" | "RD4" | "RB1" | ... | "RB4"
   descripcion: string   // label corto: "Tope de malla", "Conflicto de profesor", ...
   mensaje: string       // descripción completa legible
   secciones: SeccionRef[]

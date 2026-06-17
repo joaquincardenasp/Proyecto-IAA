@@ -61,6 +61,10 @@ class Seccion:
     rut_profesor: str
     afecta_disponibilidad: bool
     cantidad_bloques_necesarios: int = 1
+    # Duración del bloque que requiere esta sección: "2h" o "3h".
+    # El solver solo le asigna bloques de este tipo (una clase de 2h no puede ir en
+    # un bloque de 3h y viceversa). "3h" solo para clases "3-juntas" o de 3 horas.
+    duracion_bloque: str = "2h"
     bloques_asignados: list = field(default_factory=list)  # lista de BloqueHorario
 
 
