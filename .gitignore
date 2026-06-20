@@ -13,7 +13,6 @@ venv/
 CLAUDE.md
 PRD.md
 CONTEXT.md
-horario_uandes/backend/tests
 
 node_modules/
 dist/
