@@ -6,6 +6,7 @@ Restricciones blandas (RB):
   RB2  (80): Prof jornada no asignado en 8:30 ni 17:30
   RB3  (50): Distintos componentes del mismo curso en días distintos
   RB4  (50): Máximo 1 bloque del mismo componente por curso por día
+  RB5  (60): Sin ventanas entre bloques del mismo profesor el mismo día (umbral 10 min)
 
 Pesos configurables en PESOS al inicio del archivo.
 """
@@ -32,7 +33,10 @@ PESOS: dict[str, int] = {
     "RB2":  80,
     "RB3":  50,
     "RB4":  50,
+    "RB5":  60,
 }
+_MIN_VENTANA = 10  # huecos de hasta este valor (minutos) no se penalizan
+
 
 # Preferencia por la grilla estándar: cada bloque helper (no estándar) usado suma
 # esta penalización. Mantiene las clases en los horarios institucionales salvo que
@@ -365,6 +369,23 @@ def calcular_fitness(individuo: list[list[int]], ctx: GAContexto) -> tuple[float
         for count in cnt.values():
             if count > 1:
                 penalty += (count - 1) * PESOS["RB4"]
+    # RB5: ventanas de profesor (hueco entre bloques del mismo día)
+    por_prof_dia: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for i in range(len(ctx.reps)):
+        rut = ctx.rep_prof[i]
+        if not rut:
+            continue
+        for b in individuo[i]:
+            por_prof_dia[(rut, _DIA_DEL_BLOQUE[b])].append(b)
+
+    for bloques_dia in por_prof_dia.values():
+        if len(bloques_dia) < 2:
+            continue
+        ordenados = sorted(bloques_dia, key=lambda b: _MIN_INICIO_BLOQUE[b])
+        for k in range(len(ordenados) - 1):
+            hueco = _MIN_INICIO_BLOQUE[ordenados[k + 1]] - _MIN_FIN_BLOQUE[ordenados[k]]
+            if hueco > _MIN_VENTANA:
+                penalty += PESOS["RB5"]
 
     # Preferencia por la grilla estándar: penalizar cada bloque helper usado.
     for i in range(len(ctx.reps)):
@@ -460,8 +481,8 @@ class ResultadoGA:
 def ejecutar_ga(
     datos: DatosProblema,
     asignaciones_cpsat: dict[str, list[int]],
-    n_generaciones: int = 200,
-    pop_size: int = 40,
+    n_generaciones: int = 1000,
+    pop_size: int = 80,
     cxpb: float = 0.5,
     mutpb: float = 0.4,
     seed: int = 42,

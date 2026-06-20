@@ -36,7 +36,7 @@ _HORAS_EXTREMAS = {"8:30", "17:30"}
 _CURSO_PROG = "ING1103"
 
 PESOS_RB: dict[str, float] = {
-    "RB1": 100, "RB2": 80, "RB3": 50, "RB4": 50,
+    "RB1": 100, "RB2": 80, "RB3": 50, "RB4": 50, "RB5": 60,
 }
 
 
@@ -163,7 +163,7 @@ def _rd3(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
     violaciones: list[dict] = []
     for rut, ids in por_prof.items():
         prof = datos.profesores.get(rut)
-        nombre = prof.nombre if prof else rut
+        nombre = (prof.nombre if prof.nombre else prof.rut) if prof else rut
         vistos: set[frozenset] = set()
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
@@ -460,6 +460,67 @@ def _rb4(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
             ))
     return violaciones
 
+_MIN_VENTANA = 10  # huecos de hasta este valor (minutos) no se penalizan
+
+def _rb5(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
+    """Profesor con ventana (hueco) entre dos bloques el mismo día."""
+    sec_by_id = {s.id: s for s in datos.secciones}
+
+    por_prof_dia: dict[tuple[str, str], dict[str, list]] = defaultdict(
+        lambda: {"bloques": [], "secciones": []}
+    )
+    for sec_id, bloques in asig.items():
+        s = sec_by_id.get(sec_id)
+        if not s or not s.rut_profesor or not s.afecta_disponibilidad:
+            continue
+        for b in bloques:
+            key = (s.rut_profesor, _bloque_dia(b))
+            por_prof_dia[key]["bloques"].append(b)
+            if sec_id not in por_prof_dia[key]["secciones"]:
+                por_prof_dia[key]["secciones"].append(sec_id)
+
+    violaciones: list[dict] = []
+    for (rut, dia), data in por_prof_dia.items():
+        bloques_dia = data["bloques"]
+        if len(bloques_dia) < 2:
+            continue
+
+        ordenados = sorted(bloques_dia, key=lambda b: _hora_a_min(TODOS_BLOQUES[b].hora_inicio))
+        huecos = []
+        for k in range(len(ordenados) - 1):
+            fin_k     = _hora_a_min(TODOS_BLOQUES[ordenados[k]].hora_fin)
+            inicio_k1 = _hora_a_min(TODOS_BLOQUES[ordenados[k + 1]].hora_inicio)
+            hueco_min = inicio_k1 - fin_k
+            if hueco_min > _MIN_VENTANA:
+                huecos.append((ordenados[k], ordenados[k + 1], hueco_min))
+
+        if not huecos:
+            continue
+
+        prof = datos.profesores.get(rut)
+        nombre = (prof.nombre if prof.nombre else prof.rut) if prof else rut
+        dia_label = _DIA_LABEL.get(dia, dia)
+
+        infos = [
+            _sec_info(sec_by_id[sid], datos)
+            for sid in data["secciones"]
+            if sec_by_id.get(sid)
+        ]
+
+        for b1, b2, mins in huecos:
+            bloques_str = [_bloque_str(b1), _bloque_str(b2)]
+            msg = (
+                f"Prof. {nombre}: ventana de {mins} min el {dia_label} "
+                f"entre {_bloque_str(b1)} y {_bloque_str(b2)}"
+            )
+            violaciones.append(_viol(
+                "RB5", "Ventana en horario de profesor", msg,
+                infos, bloques_str,
+                f"Prof. {nombre} — {dia_label}",
+                penalizacion=PESOS_RB["RB5"],
+            ))
+
+    return violaciones
 
 # ---------------------------------------------------------------------------
 # Función principal
@@ -494,6 +555,7 @@ def generar_reporte_detallado(
     blandas.extend(_rb2(datos, asignaciones))
     blandas.extend(_rb3(datos, asignaciones))
     blandas.extend(_rb4(datos, asignaciones))
+    blandas.extend(_rb5(datos, asignaciones))
 
     por_tipo_dura: dict[str, int] = {}
     for v in duras:

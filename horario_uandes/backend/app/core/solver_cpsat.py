@@ -378,32 +378,29 @@ def resolver_con_fallback(
     tiempo_limite_s: float = 60.0,
 ) -> ResultadoSolver:
     """
-    Intenta resolver relajando restricciones progresivamente si CP-SAT devuelve
-    INFEASIBLE. Siempre retorna el mejor intento encontrado (nunca aborta).
+    Orden de relajación revisado: RD2 (disponibilidad, negociable con el profesor)
+    se relaja ANTES que RD3 (unicidad física) y RD4 (capacidad física).
 
-    Orden de relajación:
       Nivel 0 — Completo (RD1 + RD2 + RD3 + RD4)
       Nivel 1 — Sin RD4 (salas especiales)
-      Nivel 2 — Sin RD3 (conflictos de profesor)
-      Nivel 3 — Sin RD3 ni RD4
-      Nivel 4 — Sin RD3, RD4 ni RD2 (sin disponibilidad)
-      Nivel 5 — Solo intra + NRC (sin ninguna restricción inter-sección)
-
-    Las restricciones omitidas quedarán como violaciones en el reporte final.
+      Nivel 2 — Sin RD2 (disponibilidad del profesor)
+      Nivel 3 — Sin RD2 ni RD4
+      Nivel 4 — Sin RD2 ni RD3 ni RD4  ← antes era nivel 4, ahora RD3 cae aquí
+      Nivel 5 — Solo intra + NRC (emergencia total)
     """
     niveles: list[dict] = [
         dict(usar_rd2=True,  usar_rd3=True,  usar_rd4=True,  forzar_rd1=True,
              label="Solución completa (todas las restricciones)"),
         dict(usar_rd2=True,  usar_rd3=True,  usar_rd4=False, forzar_rd1=True,
-             label="Sin restricción de salas especiales (RD4 relajada)"),
-        dict(usar_rd2=True,  usar_rd3=False, usar_rd4=True,  forzar_rd1=True,
-             label="Sin conflicto de profesor (RD3 relajada)"),
-        dict(usar_rd2=True,  usar_rd3=False, usar_rd4=False, forzar_rd1=True,
-             label="Sin RD3 ni RD4 — solo topes de malla y disponibilidad"),
+             label="Sin salas especiales (RD4 relajada)"),
+        dict(usar_rd2=False, usar_rd3=True,  usar_rd4=True,  forzar_rd1=True,
+             label="Sin disponibilidad de profesor (RD2 relajada) — consultar al profesor"),
+        dict(usar_rd2=False, usar_rd3=True,  usar_rd4=False, forzar_rd1=True,
+             label="Sin RD2 ni RD4 — solo topes de malla y unicidad de profesor"),
         dict(usar_rd2=False, usar_rd3=False, usar_rd4=False, forzar_rd1=True,
-             label="Sin disponibilidad de profesor (RD2 relajada) — solo topes de malla"),
+             label="Sin RD2, RD3 ni RD4 — solo topes de malla (solución de emergencia)"),
         dict(usar_rd2=False, usar_rd3=False, usar_rd4=False, forzar_rd1=False,
-             label="Sin restricciones inter-sección — solución de emergencia"),
+             label="Sin restricciones inter-sección — solución de último recurso"),
     ]
 
     for nivel, params in enumerate(niveles):

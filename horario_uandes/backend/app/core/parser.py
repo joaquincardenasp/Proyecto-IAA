@@ -140,7 +140,7 @@ def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
                                "laboratorios programar", "talleres programar"),
         # Profesores
         "RUT_PROF1":    buscar("rut profesor 1"),
-        "NOMBRE_PROF1": buscar("nombre profesor 1"),
+        "NOMBRE_PROF1": buscar("nombre profesor banner 1", "nombre profesor 1"),
         "RUT_PROF2":    buscar("rut profesor 2"),
         "NOMBRE_PROF2": buscar("nombre profesor 2"),
         "RUT_LABT":     buscar("rut profesor labt"),
