@@ -43,6 +43,9 @@ class MetricasResult(BaseModel):
     n_secciones: int
     n_bloques_totales: int
     estado_cpsat: str
+    # Campos de fallback: presentes cuando CP-SAT no encontró solución completa.
+    nivel_relajacion: int = 0
+    advertencia_relajacion: str = ""
 
 
 # ---------------------------------------------------------------------------

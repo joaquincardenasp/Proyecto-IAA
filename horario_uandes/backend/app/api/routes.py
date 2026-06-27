@@ -25,7 +25,7 @@ from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
 from ..core.parser import cargar_datos
 from ..core.reporter import generar_reporte_detallado
-from ..core.solver_cpsat import resolver
+from ..core.solver_cpsat import resolver_con_fallback          # ← usa el fallback
 from ..core.solver_ga import (
     PESOS,
     calcular_fitness,
@@ -56,14 +56,15 @@ OUTPUTS_DIR = Path(__file__).parent.parent.parent / "outputs"
 # ---------------------------------------------------------------------------
 
 _state: dict = {
-    "status":       "idle",   # idle | running | ready | error
-    "progress":     "",
-    "error":        "",
-    "asignaciones": None,     # dict[str, list[int]]
-    "metricas":     None,     # dict
-    "reporte":      None,     # dict (salida de generar_reporte_detallado)
-    "excel_bytes":  None,     # bytes
-    "datos":        None,     # DatosProblema
+    "status":                  "idle",   # idle | running | ready | error
+    "progress":                "",
+    "error":                   "",
+    "asignaciones":            None,     # dict[str, list[int]]
+    "metricas":                None,     # dict
+    "reporte":                 None,     # dict (salida de generar_reporte_detallado)
+    "excel_bytes":             None,     # bytes
+    "datos":                   None,     # DatosProblema
+    "advertencia_relajacion":  "",       # mensaje de fallback para el frontend
 }
 _lock     = asyncio.Lock()
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -84,15 +85,31 @@ def _solve_sync(req: SolveRequest) -> None:
         _state["datos"] = datos
 
         _set_progress("Ejecutando CP-SAT…")
-        resultado_cpsat = resolver(
+        # resolver_con_fallback intenta en hasta 6 niveles de relajación;
+        # nunca lanza excepción por INFEASIBLE — siempre devuelve algo.
+        resultado_cpsat = resolver_con_fallback(
             datos,
             carreras=req.carreras,
             tiempo_limite_s=req.tiempo_limite_cpsat,
         )
-        if resultado_cpsat.estado not in ("OPTIMAL", "FEASIBLE"):
-            raise RuntimeError(f"CP-SAT no encontró solución: {resultado_cpsat.estado}")
 
-        _set_progress(f"CP-SAT: {resultado_cpsat.estado}. Ejecutando GA…")
+        if resultado_cpsat.estado not in ("OPTIMAL", "FEASIBLE"):
+            # Solo falla si ni el nivel más relajado encontró solución (muy raro).
+            raise RuntimeError(
+                "CP-SAT no encontró solución ni siquiera con restricciones mínimas. "
+                "Revisa los datos de disponibilidad en el maestro."
+            )
+
+        # Guardar la advertencia de relajación para devolverla al frontend.
+        _state["advertencia_relajacion"] = resultado_cpsat.advertencia_relajacion
+        if resultado_cpsat.nivel_relajacion > 0:
+            _set_progress(
+                f"CP-SAT: solución parcial nivel {resultado_cpsat.nivel_relajacion}/5. "
+                "Ejecutando GA…"
+            )
+        else:
+            _set_progress(f"CP-SAT: {resultado_cpsat.estado}. Ejecutando GA…")
+
         resultado_ga = ejecutar_ga(
             datos,
             resultado_cpsat.asignaciones,
@@ -115,7 +132,6 @@ def _solve_sync(req: SolveRequest) -> None:
 
         reporte_raw = generar_reporte_detallado(datos, asignaciones)
 
-        # Desglose para Excel (usa penalizacion_por_rb del reporte)
         pen_rb = reporte_raw["resumen"]["penalizacion_por_rb"]
         metricas_dict = {
             "fitness_cpsat": fitness_cpsat,
@@ -127,12 +143,14 @@ def _solve_sync(req: SolveRequest) -> None:
             },
         }
         metricas_api = {
-            "fitness_cpsat":     fitness_cpsat,
-            "fitness_ga":        fitness_ga,
-            "mejora_pct":        mejora_pct,
-            "n_secciones":       len(asignaciones),
-            "n_bloques_totales": n_bloques_totales,
-            "estado_cpsat":      resultado_cpsat.estado,
+            "fitness_cpsat":          fitness_cpsat,
+            "fitness_ga":             fitness_ga,
+            "mejora_pct":             mejora_pct,
+            "n_secciones":            len(asignaciones),
+            "n_bloques_totales":      n_bloques_totales,
+            "estado_cpsat":           resultado_cpsat.estado,
+            "nivel_relajacion":       resultado_cpsat.nivel_relajacion,
+            "advertencia_relajacion": resultado_cpsat.advertencia_relajacion,
         }
 
         _set_progress("Generando Excel…")
@@ -259,10 +277,9 @@ async def upload_files(files: list[UploadFile] = File(...)):
         INPUTS_DIR.mkdir(parents=True, exist_ok=True)
         saved = []
         for f in files:
-            # Usar solo el nombre base para evitar rutas relativas/absolutas peligrosas
             nombre = Path(f.filename or "").name
             if not nombre:
-                continue  # ignorar entradas sin nombre de archivo
+                continue
             contenido = await f.read()
             try:
                 (INPUTS_DIR / nombre).write_bytes(contenido)
@@ -292,13 +309,14 @@ async def solve(req: SolveRequest, background_tasks: BackgroundTasks):
     async with _lock:
         if _state["status"] == "running":
             raise HTTPException(status_code=409, detail="Solver ya está en ejecución")
-        _state["status"]       = "running"
-        _state["progress"]     = "Iniciando…"
-        _state["error"]        = ""
-        _state["asignaciones"] = None
-        _state["metricas"]     = None
-        _state["reporte"]      = None
-        _state["excel_bytes"]  = None
+        _state["status"]                 = "running"
+        _state["progress"]               = "Iniciando…"
+        _state["error"]                  = ""
+        _state["asignaciones"]           = None
+        _state["metricas"]               = None
+        _state["reporte"]                = None
+        _state["excel_bytes"]            = None
+        _state["advertencia_relajacion"] = ""
 
     background_tasks.add_task(_solve_background, req)
     return {"detail": "Solver iniciado"}
@@ -330,6 +348,8 @@ def get_results():
         n_secciones=metricas_raw["n_secciones"],
         n_bloques_totales=metricas_raw["n_bloques_totales"],
         estado_cpsat=metricas_raw["estado_cpsat"],
+        nivel_relajacion=metricas_raw.get("nivel_relajacion", 0),
+        advertencia_relajacion=metricas_raw.get("advertencia_relajacion", ""),
     )
     reporte = _build_reporte(_state["reporte"]) if _state["reporte"] else None
     return SolveResult(metricas=metricas, secciones=secciones, reporte=reporte)
