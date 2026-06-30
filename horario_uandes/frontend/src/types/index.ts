@@ -82,3 +82,24 @@ export interface SolveParams {
   tiempo_limite_cpsat: number
   seed: number
 }
+export interface BloqueCatalogo {
+  idx: number
+  dia: Dia
+  hora_inicio: string
+  hora_fin: string
+  tipo: '1h' | '2h' | '3h'
+  es_estandar: boolean
+}
+
+export interface ViolacionDura {
+  tipo: string
+  secciones: string[]
+  bloques: number[]
+  mensaje: string
+}
+
+export interface ValidarHorarioResponse {
+  factible: boolean
+  violaciones_duras: ViolacionDura[]
+  penalizacion_blanda: number
+}

@@ -1,10 +1,25 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { AlertCircle, Check, Download, Loader2 } from "lucide-react";
-import { getStatus, getResults, EXPORT_URL } from "./api/client";
-import type { SolveResult, StatusResponse } from "./types";
+import {
+  getStatus,
+  getResults,
+  EXPORT_URL,
+  guardarHorario,
+  getBloquesCatalogo,
+  validarHorario,
+} from "./api/client";
+import type {
+  SolveResult,
+  StatusResponse,
+  BloqueCatalogo,
+  ValidarHorarioResponse,
+  Dia,
+  SeccionAsignada,
+} from "./types";
 import SolverPanel from "./components/SolverPanel";
 import HorarioGrid from "./components/HorarioGrid";
 import MetricasPanel from "./components/MetricasPanel";
+import ValidacionPanel from "./components/ValidacionPanel";
 
 type Tab = "solver" | "horario" | "metricas";
 
@@ -46,6 +61,19 @@ export default function App() {
   const [results, setResults] = useState<SolveResult | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ── Estado de edición manual del horario ──────────────────────────────────
+  const [editando, setEditando] = useState(false);
+  const [seccionesEditables, setSeccionesEditables] = useState<
+    SeccionAsignada[]
+  >([]);
+  const [bloquesCatalogo, setBloquesCatalogo] = useState<BloqueCatalogo[]>([]);
+  const [validacion, setValidacion] = useState<ValidarHorarioResponse | null>(
+    null,
+  );
+  const [validando, setValidando] = useState(false);
+  const [guardando, setGuardando] = useState(false);
+  const [guardadoOk, setGuardadoOk] = useState(false);
+
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
@@ -76,6 +104,14 @@ export default function App() {
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
+  useEffect(() => {
+    getBloquesCatalogo().then(setBloquesCatalogo).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    if (results) setSeccionesEditables(results.secciones);
+  }, [results]);
+
   const isRunning = status.status === "running";
   const activeStage = isRunning ? progressToStage(status.progress) : 0;
 
@@ -85,19 +121,154 @@ export default function App() {
     { id: "metricas", label: "Métricas", disabled: !results },
   ];
 
+  function toMin(h: string) {
+    const [a, b] = h.split(":").map(Number);
+    return a * 60 + b;
+  }
+  function minToHora(m: number) {
+    const h = Math.floor(m / 60),
+      mm = m % 60;
+    return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  }
+
+  function moverBloque(
+    secId: string,
+    bloqueIdx: number,
+    nuevoDia: Dia,
+    nuevaHoraInicio: string,
+  ) {
+    setSeccionesEditables((prev) =>
+      prev.map((sec) => {
+        if (sec.id !== secId) return sec;
+        const orig = sec.bloques[bloqueIdx];
+        if (!orig) return sec;
+        const dur = toMin(orig.hora_fin) - toMin(orig.hora_inicio);
+        const nuevos = sec.bloques.map((b, i) =>
+          i === bloqueIdx
+            ? {
+                ...b,
+                dia: nuevoDia,
+                hora_inicio: nuevaHoraInicio,
+                hora_fin: minToHora(toMin(nuevaHoraInicio) + dur),
+              }
+            : b,
+        );
+        return { ...sec, bloques: nuevos };
+      }),
+    );
+    setValidacion(null);
+  }
+
+  function buildPayload() {
+    const findIdx = (b: {
+      dia: Dia;
+      hora_inicio: string;
+      hora_fin: string;
+      tipo_bloque: string;
+    }) => {
+      const iniM = toMin(b.hora_inicio);
+      const finM = toMin(b.hora_fin);
+
+      const exacto = bloquesCatalogo.find(
+        (c) =>
+          c.dia === b.dia &&
+          toMin(c.hora_inicio) === iniM &&
+          toMin(c.hora_fin) === finM,
+      );
+      if (exacto) return exacto.idx;
+
+      const candsTipo = bloquesCatalogo.filter(
+        (c) => c.dia === b.dia && c.tipo === b.tipo_bloque,
+      );
+      if (candsTipo.length > 0) {
+        return candsTipo.reduce((best, c) =>
+          Math.abs(toMin(c.hora_inicio) - iniM) <
+          Math.abs(toMin(best.hora_inicio) - iniM)
+            ? c
+            : best,
+        ).idx;
+      }
+
+      const candsDia = bloquesCatalogo.filter((c) => c.dia === b.dia);
+      if (candsDia.length === 0) return undefined;
+      return candsDia.reduce((best, c) =>
+        Math.abs(toMin(c.hora_inicio) - iniM) <
+        Math.abs(toMin(best.hora_inicio) - iniM)
+          ? c
+          : best,
+      ).idx;
+    };
+
+    return seccionesEditables.map((sec) => ({
+      sec_id: sec.id,
+      bloques: sec.bloques
+        .map((b) => findIdx(b))
+        .filter((i): i is number => i !== undefined),
+    }));
+  }
+
+  async function calcularRestricciones() {
+    setValidando(true);
+    try {
+      const res = await validarHorario(buildPayload());
+      setValidacion(res);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setValidando(false);
+    }
+  }
+
+  const hayCambios = useMemo(() => {
+    if (!results) return false;
+    return (
+      JSON.stringify(seccionesEditables) !== JSON.stringify(results.secciones)
+    );
+  }, [seccionesEditables, results]);
+
+  function descartarCambios() {
+    if (!results) return;
+    setSeccionesEditables(results.secciones);
+    setValidacion(null);
+    setGuardadoOk(false);
+  }
+
+  async function guardarCambios() {
+    setGuardando(true);
+    setGuardadoOk(false);
+    try {
+      const nuevoResultado = await guardarHorario(buildPayload());
+      setResults(nuevoResultado);
+      setSeccionesEditables(nuevoResultado.secciones);
+      setValidacion(null);
+      setGuardadoOk(true);
+      setTimeout(() => setGuardadoOk(false), 3000);
+    } catch (e) {
+      console.error(e);
+      alert(`No se pudo guardar el horario: ${(e as Error).message}`);
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  const seccionesConViolacion = useMemo(() => {
+    if (!validacion) return undefined;
+    const set = new Set<string>();
+    for (const v of validacion.violaciones_duras)
+      for (const s of v.secciones) set.add(s);
+    return set;
+  }, [validacion]);
+
   return (
     <div className="min-h-screen bg-[#FAFAFA] flex flex-col">
       {/* ── Header institucional ──────────────────────────────────────────── */}
       <header className="bg-[#B71C1C] shrink-0">
         <div className="max-w-screen-xl mx-auto px-6 py-4 flex items-center gap-5">
-          {/* Logotipo textual */}
           <div className="border-r border-red-700 pr-5 shrink-0">
             <span className="text-white font-bold text-sm tracking-widest uppercase">
               Uandes
             </span>
           </div>
-
-          {/* Título */}
           <div className="flex-1 min-w-0">
             <h1 className="text-white font-semibold text-sm leading-tight truncate">
               Generador de Horarios
@@ -106,8 +277,6 @@ export default function App() {
               Facultad de Ingeniería y Ciencias Aplicadas
             </p>
           </div>
-
-          {/* Acciones */}
           <div className="flex items-center gap-3 shrink-0">
             {isRunning && (
               <span className="flex items-center gap-1.5 text-xs text-red-200">
@@ -120,8 +289,7 @@ export default function App() {
                 href={EXPORT_URL}
                 download="horario_generado.xlsx"
                 className="flex items-center gap-1.5 text-xs font-medium bg-white
-                           text-[#B71C1C] hover:bg-red-50 px-3 py-1.5 rounded
-                           transition-colors"
+                          text-[#B71C1C] hover:bg-red-50 px-3 py-1.5 rounded transition-colors"
               >
                 <Download size={13} />
                 Descargar Excel
@@ -151,10 +319,7 @@ export default function App() {
               >
                 {t.label}
                 {t.id === "horario" && results && (
-                  <span
-                    className="ml-2 text-[11px] bg-gray-100 text-gray-500
-                                   px-1.5 py-0.5 rounded font-normal tabular-nums"
-                  >
+                  <span className="ml-2 text-[11px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-normal tabular-nums">
                     {results.secciones.length}
                   </span>
                 )}
@@ -182,13 +347,7 @@ export default function App() {
                     <div className="flex items-center gap-2 shrink-0">
                       <div
                         className={`w-6 h-6 rounded-full flex items-center justify-center
-                          ${
-                            isDone
-                              ? "bg-green-600"
-                              : isActive
-                                ? "bg-[#B71C1C]"
-                                : "bg-gray-200"
-                          }`}
+                          ${isDone ? "bg-green-600" : isActive ? "bg-[#B71C1C]" : "bg-gray-200"}`}
                       >
                         {isDone ? (
                           <Check
@@ -198,8 +357,7 @@ export default function App() {
                           />
                         ) : (
                           <span
-                            className={`text-[10px] font-bold
-                                ${isActive ? "text-white" : "text-gray-400"}`}
+                            className={`text-[10px] font-bold ${isActive ? "text-white" : "text-gray-400"}`}
                           >
                             {num}
                           </span>
@@ -207,21 +365,14 @@ export default function App() {
                       </div>
                       <span
                         className={`text-xs font-medium hidden md:block
-                          ${
-                            isDone
-                              ? "text-green-600"
-                              : isActive
-                                ? "text-[#B71C1C]"
-                                : "text-gray-400"
-                          }`}
+                          ${isDone ? "text-green-600" : isActive ? "text-[#B71C1C]" : "text-gray-400"}`}
                       >
                         {stage.label}
                       </span>
                     </div>
                     {!isLast && (
                       <div
-                        className={`h-px flex-1 mx-3 transition-colors
-                          ${isDone ? "bg-green-300" : "bg-gray-200"}`}
+                        className={`h-px flex-1 mx-3 transition-colors ${isDone ? "bg-green-300" : "bg-gray-200"}`}
                       />
                     )}
                   </div>
@@ -235,10 +386,7 @@ export default function App() {
       {/* ── Banner de error ───────────────────────────────────────────────── */}
       {status.status === "error" && status.error && (
         <div className="bg-red-50 border-b border-red-200 px-6 py-2.5 shrink-0">
-          <div
-            className="max-w-screen-xl mx-auto flex items-center gap-2
-                          text-sm text-red-700"
-          >
+          <div className="max-w-screen-xl mx-auto flex items-center gap-2 text-sm text-red-700">
             <AlertCircle size={14} className="shrink-0" />
             {status.error}
           </div>
@@ -250,9 +398,74 @@ export default function App() {
         {tab === "solver" && (
           <SolverPanel status={status} onSolveStarted={startPolling} />
         )}
+
         {tab === "horario" && results && (
-          <HorarioGrid secciones={results.secciones} />
+          <>
+            <div className="flex items-center gap-2 mb-4">
+              <button
+                onClick={() => setEditando((e) => !e)}
+                className={`text-xs font-medium px-3 py-1.5 rounded transition-colors
+                  ${editando ? "bg-gray-800 text-white" : "border border-gray-300 text-gray-600 hover:bg-gray-50"}`}
+              >
+                {editando ? "Modo edición activo" : "Editar horario"}
+              </button>
+              {editando && (
+                <>
+                  <button
+                    onClick={calcularRestricciones}
+                    disabled={validando}
+                    className="text-xs font-medium px-3 py-1.5 rounded bg-[#B71C1C] text-white hover:bg-[#C62828]
+                              disabled:opacity-50"
+                  >
+                    {validando ? "Calculando…" : "Calcular restricciones"}
+                  </button>
+                  <button
+                    onClick={descartarCambios}
+                    disabled={!hayCambios}
+                    className="text-xs font-medium px-3 py-1.5 rounded border border-gray-300
+                              text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+                  >
+                    Descartar cambios
+                  </button>
+                  <button
+                    onClick={guardarCambios}
+                    disabled={!hayCambios || guardando}
+                    className="text-xs font-medium px-3 py-1.5 rounded bg-green-700 text-white
+                              hover:bg-green-800 disabled:opacity-40"
+                  >
+                    {guardando ? "Guardando…" : "Guardar"}
+                  </button>
+                  {guardadoOk && (
+                    <span className="text-xs text-green-700 font-medium">
+                      ✓ Horario guardado
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+
+            <HorarioGrid
+              secciones={editando ? seccionesEditables : results.secciones}
+              bloquesCatalogo={bloquesCatalogo}
+              editable={editando}
+              seccionesConViolacion={seccionesConViolacion}
+              onMoverBloque={moverBloque}
+            />
+
+            {validacion && (
+              <ValidacionPanel
+                resultado={validacion}
+                onClose={() => setValidacion(null)}
+                onJumpToSeccion={(secId) => {
+                  document
+                    .getElementById(`sec-${secId}`)
+                    ?.scrollIntoView({ behavior: "smooth", block: "center" });
+                }}
+              />
+            )}
+          </>
         )}
+
         {tab === "metricas" && results && (
           <MetricasPanel
             metricas={results.metricas}

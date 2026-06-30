@@ -69,20 +69,19 @@ from .models import DatosProblema, TipoReunion
 
 @dataclass
 class ResultadoSolver:
-    asignaciones: dict[str, list[int]] = field(default_factory=dict)  # sec_id → [bloque_idx, ...]
+    asignaciones: dict[str, list[int]] = field(default_factory=dict)
     estado: str = "UNKNOWN"
-    # Conteos de restricciones agregadas al modelo (para diagnóstico).
     n_rd1: int = 0
-    n_rd2: int = 0   # RD2 va en el dominio de cada variable, no como restricción aparte → 0
-    n_rc: int = 0    # NRC: componentes de la misma sección que no se solapan
+    n_rd2: int = 0
+    n_rc: int = 0
     n_intra: int = 0
     n_rd3: int = 0
     n_rd4: int = 0
-    n_rd7: int = 0   # RD7 va en el dominio de las AYUD → 0
-    n_rd8: int = 0   # no usado en el modelo actual
-    # Campos de fallback: indican si se relajaron restricciones para obtener la solución.
-    nivel_relajacion: int = 0        # 0 = solución completa; >0 = restricciones relajadas
-    advertencia_relajacion: str = "" # mensaje para mostrar en el frontend
+    n_rd7: int = 0
+    n_rd8: int = 0
+    n_rd2_violado: int = 0         
+    nivel_relajacion: int = 0
+    advertencia_relajacion: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +163,7 @@ def resolver(
     carreras: list[str] | None = None,
     tiempo_limite_s: float = 60.0,
     usar_rd2: bool = True,
+    peso_rd2_suave: int = 0,   
     usar_rd3: bool = True,
     usar_rd4: bool = True,
     _forzar_rd1: bool = True,
@@ -197,27 +197,47 @@ def resolver(
 
     # Variables por sección (dominio = disponibilidad de la sección)
     dom_de: dict[str, list[int]] = {}
+    dom_pref_de: dict[str, list[int]] = {}   # ← NUEVO: solo se usa si peso_rd2_suave > 0
     x: dict[str, list[cp_model.IntVar]] = {}
+    rd2_indicators: list[cp_model.IntVar] = []   # ← NUEVO
+
     for s in secciones:
-        dom_base = sorted(disponibilidad_seccion(datos, s, usar_rd2))
+        if peso_rd2_suave > 0:
+            # Dominio SIN restringir por disponibilidad (CP-SAT puede usar cualquier bloque
+            # de la duración correcta); la disponibilidad real se guarda aparte para penalizar.
+            dom_base = sorted(disponibilidad_seccion(datos, s, usar_rd2=False))
+            dom_pref = sorted(disponibilidad_seccion(datos, s, usar_rd2=True))
+        else:
+            dom_base = sorted(disponibilidad_seccion(datos, s, usar_rd2))
+            dom_pref = dom_base  # sin modo suave, no aplica distinción
+
         if not dom_base:
             return ResultadoSolver(estado="INFEASIBLE")
         dom_de[s.id] = dom_base
+        dom_pref_de[s.id] = dom_pref
 
-        tipos = s.tipos_bloques_necesarios  # [] o ["2h","1h"]
+        tipos = s.tipos_bloques_necesarios
         vars_seccion = []
         for k in range(s.cantidad_bloques_necesarios):
             if tipos and k < len(tipos):
                 filtro = {"1h": BLOQUES_1H, "2h": BLOQUES_2H_SET, "3h": BLOQUES_3H_SET}.get(tipos[k])
                 dom_k = sorted(b for b in dom_base if filtro is None or b in filtro)
             else:
-                # sin tipo específico: excluir bloques de 1h (no aplican a clases normales)
                 dom_k = sorted(b for b in dom_base if b not in BLOQUES_1H)
             if not dom_k:
                 return ResultadoSolver(estado="INFEASIBLE")
-            vars_seccion.append(
-                model.NewIntVarFromDomain(cp_model.Domain.FromValues(dom_k), f"{s.id}_b{k}")
-            )
+            var = model.NewIntVarFromDomain(cp_model.Domain.FromValues(dom_k), f"{s.id}_b{k}")
+            vars_seccion.append(var)
+
+            # ── RD2 SUAVE: penalizar (no prohibir) bloques fuera de disponibilidad ──
+            if peso_rd2_suave > 0:
+                fuera_k = sorted(set(dom_k) - set(dom_pref))
+                if fuera_k:
+                    bi = model.NewBoolVar(f"rd2_fuera_{s.id}_{k}")
+                    model.AddAllowedAssignments([var], [[b] for b in fuera_k]).OnlyEnforceIf(bi)
+                    model.AddForbiddenAssignments([var], [[b] for b in fuera_k]).OnlyEnforceIf(bi.Not())
+                    rd2_indicators.append(bi)
+
         x[s.id] = vars_seccion
 
     def _nover(a_vars, b_vars) -> int:
@@ -360,13 +380,15 @@ def resolver(
         for sec_id, vars_ in x.items()
     }
 
+    n_rd2_violado = sum(solver.Value(bi) for bi in rd2_indicators) if rd2_indicators else 0
+
     return ResultadoSolver(
         asignaciones=asignaciones,
         estado=estado,
         n_rd1=n_rd1, n_rd2=0, n_rc=n_rc, n_intra=n_intra,
         n_rd3=n_rd3, n_rd4=n_rd4, n_rd7=n_rd7, n_rd8=n_rd8,
+        n_rd2_violado=n_rd2_violado,
     )
-
 
 # ---------------------------------------------------------------------------
 # Fallback progresivo — función principal a usar desde routes.py
@@ -378,29 +400,32 @@ def resolver_con_fallback(
     tiempo_limite_s: float = 60.0,
 ) -> ResultadoSolver:
     """
-    Orden de relajación revisado: RD2 (disponibilidad, negociable con el profesor)
-    se relaja ANTES que RD3 (unicidad física) y RD4 (capacidad física).
-
-      Nivel 0 — Completo (RD1 + RD2 + RD3 + RD4)
+      Nivel 0 — Completo (RD1 + RD2 duro + RD3 + RD4)
       Nivel 1 — Sin RD4 (salas especiales)
-      Nivel 2 — Sin RD2 (disponibilidad del profesor)
-      Nivel 3 — Sin RD2 ni RD4
-      Nivel 4 — Sin RD2 ni RD3 ni RD4  ← antes era nivel 4, ahora RD3 cae aquí
-      Nivel 5 — Solo intra + NRC (emergencia total)
+      Nivel 2 — RD2 SUAVE (peso alto): minimiza violaciones en vez de ignorarlas
+      Nivel 3 — RD2 suave + sin RD4
+      Nivel 4 — RD2 completamente apagado (último recurso antes de tocar RD3)
+      Nivel 5 — Sin RD2 ni RD4
+      Nivel 6 — Sin RD2, RD3 ni RD4
+      Nivel 7 — Sin restricciones inter-sección
     """
     niveles: list[dict] = [
-        dict(usar_rd2=True,  usar_rd3=True,  usar_rd4=True,  forzar_rd1=True,
+        dict(usar_rd2=True,  peso_rd2_suave=0,   usar_rd3=True, usar_rd4=True,  forzar_rd1=True,
              label="Solución completa (todas las restricciones)"),
-        dict(usar_rd2=True,  usar_rd3=True,  usar_rd4=False, forzar_rd1=True,
+        dict(usar_rd2=True,  peso_rd2_suave=0,   usar_rd3=True, usar_rd4=False, forzar_rd1=True,
              label="Sin salas especiales (RD4 relajada)"),
-        dict(usar_rd2=False, usar_rd3=True,  usar_rd4=True,  forzar_rd1=True,
-             label="Sin disponibilidad de profesor (RD2 relajada) — consultar al profesor"),
-        dict(usar_rd2=False, usar_rd3=True,  usar_rd4=False, forzar_rd1=True,
-             label="Sin RD2 ni RD4 — solo topes de malla y unicidad de profesor"),
-        dict(usar_rd2=False, usar_rd3=False, usar_rd4=False, forzar_rd1=True,
-             label="Sin RD2, RD3 ni RD4 — solo topes de malla (solución de emergencia)"),
-        dict(usar_rd2=False, usar_rd3=False, usar_rd4=False, forzar_rd1=False,
-             label="Sin restricciones inter-sección — solución de último recurso"),
+        dict(usar_rd2=True,  peso_rd2_suave=500, usar_rd3=True, usar_rd4=True,  forzar_rd1=True,
+             label="RD2 suave — minimizando violaciones de disponibilidad de profesor"),
+        dict(usar_rd2=True,  peso_rd2_suave=500, usar_rd3=True, usar_rd4=False, forzar_rd1=True,
+             label="RD2 suave + sin salas especiales"),
+        dict(usar_rd2=False, peso_rd2_suave=0,   usar_rd3=True, usar_rd4=True,  forzar_rd1=True,
+             label="Sin disponibilidad de profesor (RD2 apagada) — consultar al profesor"),
+        dict(usar_rd2=False, peso_rd2_suave=0,   usar_rd3=True, usar_rd4=False, forzar_rd1=True,
+             label="Sin RD2 ni RD4"),
+        dict(usar_rd2=False, peso_rd2_suave=0,   usar_rd3=False, usar_rd4=False, forzar_rd1=True,
+             label="Sin RD2, RD3 ni RD4 — solo topes de malla (emergencia)"),
+        dict(usar_rd2=False, peso_rd2_suave=0,   usar_rd3=False, usar_rd4=False, forzar_rd1=False,
+             label="Sin restricciones inter-sección — último recurso"),
     ]
 
     for nivel, params in enumerate(niveles):
@@ -412,6 +437,7 @@ def resolver_con_fallback(
             carreras=carreras,
             tiempo_limite_s=tiempo_limite_s,
             usar_rd2=params["usar_rd2"],
+            peso_rd2_suave=params["peso_rd2_suave"],
             usar_rd3=params["usar_rd3"],
             usar_rd4=params["usar_rd4"],
             _forzar_rd1=params["forzar_rd1"],
@@ -421,22 +447,23 @@ def resolver_con_fallback(
             resultado.nivel_relajacion = nivel
             if nivel == 0:
                 resultado.advertencia_relajacion = ""
+            elif params["peso_rd2_suave"] > 0:
+                resultado.advertencia_relajacion = (
+                    f"⚠ Solución parcial (nivel {nivel}/{len(niveles)-1}): {params['label']}. "
+                    f"{resultado.n_rd2_violado} sección(es) quedaron fuera de la disponibilidad "
+                    f"declarada de su profesor (el mínimo posible dado el resto de restricciones)."
+                )
             else:
                 resultado.advertencia_relajacion = (
-                    f"⚠ Solución parcial (nivel {nivel}/5): {params['label']}. "
+                    f"⚠ Solución parcial (nivel {nivel}/{len(niveles)-1}): {params['label']}. "
                     "Las restricciones omitidas aparecerán como violaciones en el reporte."
                 )
-                print(f"[FALLBACK] ✓ Solución encontrada en nivel {nivel}: {params['label']}")
+            print(f"[FALLBACK] ✓ Solución encontrada en nivel {nivel}: {params['label']}")
             return resultado
 
-    # Nunca debería llegar aquí, pero retornamos INFEASIBLE limpio si ocurre.
-    print("[FALLBACK] ✗ No se encontró solución en ningún nivel.")
     ultimo = ResultadoSolver(estado="INFEASIBLE")
     ultimo.nivel_relajacion = len(niveles)
-    ultimo.advertencia_relajacion = (
-        "❌ No se encontró ninguna solución. "
-        "Revisa los datos de disponibilidad y salas en el maestro."
-    )
+    ultimo.advertencia_relajacion = "❌ No se encontró ninguna solución."
     return ultimo
 
 

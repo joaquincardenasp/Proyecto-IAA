@@ -1,4 +1,9 @@
-import type { SolveResult, StatusResponse } from '../types'
+import type {
+  SolveResult,
+  StatusResponse,
+  BloqueCatalogo,
+  ValidarHorarioResponse,
+} from '../types'
 
 // En desarrollo: BASE = '/api'  →  Vite proxea a http://localhost:8000/api
 // En producción: BASE = 'https://tu-backend.onrender.com/api'
@@ -38,3 +43,40 @@ export async function getResults(): Promise<SolveResult> {
 }
 
 export const EXPORT_URL = `${BASE}/export`
+
+
+// ── Validación manual de horario ─────────────────────────────────────────────
+
+export async function getBloquesCatalogo(): Promise<BloqueCatalogo[]> {
+  const r = await fetch(`${BASE}/bloques`)
+  if (!r.ok) throw new Error(`Error ${r.status}`)
+  return r.json()
+}
+
+export async function validarHorario(
+  asignaciones: { sec_id: string; bloques: number[] }[],
+  carreras?: string[],
+): Promise<ValidarHorarioResponse> {
+  const r = await fetch(`${BASE}/validar-horario`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ asignaciones, carreras }),
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}))
+    throw new Error((err as { detail?: string }).detail ?? `Error ${r.status}`)
+  }
+  return r.json()
+}
+
+export async function guardarHorario(
+  asignaciones: { sec_id: string; bloques: number[] }[],
+): Promise<SolveResult> {
+  const res = await fetch(`${BASE}/guardar-horario`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ asignaciones }),
+  });
+  if (!res.ok) throw new Error((await res.json()).detail);
+  return res.json();
+}

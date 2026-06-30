@@ -33,8 +33,11 @@ from ..core.solver_ga import (
     ejecutar_ga,
     encode,
 )
+from ..core.validador import validar_horario
+
 from ..schemas.solve import (
     BloqueAsignado,
+    BloqueCatalogoOut,
     MetricasResult,
     ReporteDetallado,
     ResumenReporte,
@@ -43,6 +46,9 @@ from ..schemas.solve import (
     SolveRequest,
     SolveResult,
     StatusResponse,
+    ValidarHorarioRequest,
+    ValidarHorarioResponse,
+    ViolacionDuraOut,
     ViolacionItem,
 )
 
@@ -379,3 +385,124 @@ def export_excel():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="horario_generado.xlsx"'},
     )
+
+@router.get("/bloques", response_model=list[BloqueCatalogoOut])
+def get_bloques():
+    """
+    Catálogo de bloques (día/hora/tipo) para que el frontend traduzca posiciones
+    del grid (día + hora de inicio) a índices de bloque al armar asignaciones
+    manuales para /validar-horario.
+    """
+    return [
+        BloqueCatalogoOut(
+            idx=i,
+            dia=b.dia.value,
+            hora_inicio=b.hora_inicio,
+            hora_fin=b.hora_fin,
+            tipo=b.tipo,
+            es_estandar=b.es_estandar,
+        )
+        for i, b in enumerate(TODOS_BLOQUES)
+    ]
+
+
+@router.post("/validar-horario", response_model=ValidarHorarioResponse)
+def validar_horario_endpoint(req: ValidarHorarioRequest):
+    """
+    Recibe el horario actual del frontend (tal como quedó tras el drag & drop) y
+    recalcula restricciones duras/blandas directamente, SIN volver a correr CP-SAT/GA.
+    """
+    datos = _state.get("datos")
+    if datos is None:
+        raise HTTPException(
+            status_code=409,
+            detail=("No hay datos cargados aún. Corre /api/solve al menos una vez "
+                     "antes de poder validar un horario editado a mano."),
+        )
+
+    asignaciones = {item.sec_id: item.bloques for item in req.asignaciones}
+    resultado = validar_horario(datos, asignaciones, carreras=req.carreras)
+
+    return ValidarHorarioResponse(
+        factible=resultado.factible,
+        violaciones_duras=[
+            ViolacionDuraOut(tipo=v.tipo, secciones=v.secciones, bloques=v.bloques, mensaje=v.mensaje)
+            for v in resultado.violaciones_duras
+        ],
+        penalizacion_blanda=resultado.penalizacion_blanda,
+    )
+@router.post("/guardar-horario", response_model=SolveResult)
+def guardar_horario_endpoint(req: ValidarHorarioRequest):
+    """
+    Persiste el horario editado a mano como la nueva solución oficial:
+    recalcula métricas, reporte y el Excel exportable, sin volver a correr CP-SAT/GA.
+    """
+    datos = _state.get("datos")
+    if datos is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No hay datos cargados aún. Corre /api/solve al menos una vez.",
+        )
+    if _state["status"] == "running":
+        raise HTTPException(status_code=409, detail="El solver está corriendo, espera a que termine.")
+
+    asignaciones = {item.sec_id: item.bloques for item in req.asignaciones}
+    if not asignaciones:
+        raise HTTPException(status_code=400, detail="El horario editado está vacío.")
+
+    try:
+        ctx = construir_contexto(datos, asignaciones)
+        fitness_actual = calcular_fitness(encode(asignaciones, ctx), ctx)[0]
+        reporte_raw = generar_reporte_detallado(datos, asignaciones)
+        n_bloques_totales = sum(len(b) for b in asignaciones.values())
+
+        prev = _state["metricas"] or {}
+        fitness_previo = prev.get("fitness_ga", fitness_actual)
+        mejora_pct = (
+            (fitness_previo - fitness_actual) / fitness_previo * 100
+            if fitness_previo > 0 else 0.0
+        )
+
+        metricas_dict = {
+            "fitness_cpsat": prev.get("fitness_cpsat", fitness_actual),
+            "fitness_ga":    fitness_actual,
+            "mejora_pct":    mejora_pct,
+            "rb_detalle": {
+                f"RB{k+1} (peso {v})": reporte_raw["resumen"]["penalizacion_por_rb"].get(f"RB{k+1}", 0)
+                for k, v in enumerate(PESOS.values())
+            },
+        }
+        metricas_api = {
+            "fitness_cpsat":          metricas_dict["fitness_cpsat"],
+            "fitness_ga":             fitness_actual,
+            "mejora_pct":             mejora_pct,
+            "n_secciones":            len(asignaciones),
+            "n_bloques_totales":      n_bloques_totales,
+            "estado_cpsat":           prev.get("estado_cpsat", "EDITADO_MANUALMENTE"),
+            "nivel_relajacion":       prev.get("nivel_relajacion", 0),
+            "advertencia_relajacion": _state["advertencia_relajacion"],
+        }
+
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            excel_bytes = exportar_horario(
+                datos, asignaciones,
+                output_path=OUTPUTS_DIR / "horario_generado.xlsx",
+                metricas=metricas_dict, reporte=reporte_raw,
+            )
+        except PermissionError:
+            excel_bytes = exportar_horario(
+                datos, asignaciones, metricas=metricas_dict, reporte=reporte_raw,
+            )
+
+        _state["asignaciones"] = asignaciones
+        _state["metricas"]     = metricas_api
+        _state["reporte"]      = reporte_raw
+        _state["excel_bytes"]  = excel_bytes
+        _state["status"]       = "ready"
+
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error al guardar el horario: {exc}")
+
+    return get_results()

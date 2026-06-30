@@ -89,3 +89,39 @@ class SolveResult(BaseModel):
     metricas: MetricasResult
     secciones: list[SeccionAsignada]
     reporte: Optional[ReporteDetallado] = None
+
+
+# ---------------------------------------------------------------------------
+# Validación manual de horario (drag & drop)
+# ---------------------------------------------------------------------------
+
+class BloqueCatalogoOut(BaseModel):
+    idx: int
+    dia: str
+    hora_inicio: str
+    hora_fin: str
+    tipo: str          # "1h" | "2h" | "3h"
+    es_estandar: bool
+
+
+class BloqueManual(BaseModel):
+    sec_id: str
+    bloques: list[int]   # índices de bloque (mismo espacio que TODOS_BLOQUES)
+
+
+class ValidarHorarioRequest(BaseModel):
+    asignaciones: list[BloqueManual]
+    carreras: Optional[list[str]] = None
+
+
+class ViolacionDuraOut(BaseModel):
+    tipo: str
+    secciones: list[str]
+    bloques: list[int] = []
+    mensaje: str
+
+
+class ValidarHorarioResponse(BaseModel):
+    factible: bool
+    violaciones_duras: list[ViolacionDuraOut]
+    penalizacion_blanda: float

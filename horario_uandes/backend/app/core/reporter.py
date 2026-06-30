@@ -23,6 +23,7 @@ from typing import Optional
 
 from .blocks import MATRIZ_SOLAPAMIENTO, TODOS_BLOQUES
 from .models import DatosProblema, TipoProfesor, TipoReunion
+from .solver_cpsat import disponibilidad_seccion
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,7 +37,7 @@ _HORAS_EXTREMAS = {"8:30", "17:30"}
 _CURSO_PROG = "ING1103"
 
 PESOS_RB: dict[str, float] = {
-    "RB1": 100, "RB2": 80, "RB3": 50, "RB4": 50, "RB5": 60,
+    "RB1": 100, "RB2": 80, "RB3": 50, "RB4": 50,
 }
 
 
@@ -150,6 +151,31 @@ def _rd1(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
                     ))
     return violaciones
 
+def _rd2(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
+    """Sección con bloques fuera de la disponibilidad declarada del profesor."""
+    sec_by_id = {s.id: s for s in datos.secciones}
+    violaciones: list[dict] = []
+    for sec_id, bloques in asig.items():
+        s = sec_by_id.get(sec_id)
+        if not s:
+            continue
+        dom = disponibilidad_seccion(datos, s, usar_rd2=True)
+        fuera = [b for b in bloques if b not in dom]
+        if not fuera:
+            continue
+        prof = datos.profesores.get(s.rut_profesor)
+        nombre = prof.nombre if prof else s.rut_profesor
+        info = _sec_info(s, datos)
+        bloques_str = sorted({_bloque_str(b) for b in fuera})
+        msg = (
+            f"{_sec_label(info)} quedó fuera de la disponibilidad declarada "
+            f"de Prof. {nombre} en {', '.join(bloques_str)}"
+        )
+        violaciones.append(_viol(
+            "RD2", "Fuera de disponibilidad del profesor", msg,
+            [info], bloques_str, f"Prof. {nombre}",
+        ))
+    return violaciones
 
 def _rd3(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
     """Conflicto de profesor: mismo prof en dos secciones de cursos distintos a la vez."""
@@ -304,7 +330,26 @@ def _rd4(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
 
     return violaciones
 
-
+def _rd7(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
+    """Ayudantía asignada antes de las 12:30."""
+    sec_by_id = {s.id: s for s in datos.secciones}
+    min_12_30 = _hora_a_min("12:30")
+    violaciones: list[dict] = []
+    for sec_id, bloques in asig.items():
+        s = sec_by_id.get(sec_id)
+        if not s or s.componente != TipoReunion.AYUD:
+            continue
+        antes = [b for b in bloques if _hora_a_min(TODOS_BLOQUES[b].hora_inicio) < min_12_30]
+        if not antes:
+            continue
+        info = _sec_info(s, datos)
+        bloques_str = sorted({_bloque_str(b) for b in antes})
+        msg = f"{_sec_label(info)} quedó antes de las 12:30 ({', '.join(bloques_str)})"
+        violaciones.append(_viol(
+            "RD7", "Ayudantía antes de las 12:30", msg,
+            [info], bloques_str, "Ayudantías deben ser desde las 12:30",
+        ))
+    return violaciones
 # ---------------------------------------------------------------------------
 # Restricciones blandas
 # ---------------------------------------------------------------------------
@@ -460,67 +505,6 @@ def _rb4(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
             ))
     return violaciones
 
-_MIN_VENTANA = 10  # huecos de hasta este valor (minutos) no se penalizan
-
-def _rb5(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
-    """Profesor con ventana (hueco) entre dos bloques el mismo día."""
-    sec_by_id = {s.id: s for s in datos.secciones}
-
-    por_prof_dia: dict[tuple[str, str], dict[str, list]] = defaultdict(
-        lambda: {"bloques": [], "secciones": []}
-    )
-    for sec_id, bloques in asig.items():
-        s = sec_by_id.get(sec_id)
-        if not s or not s.rut_profesor or not s.afecta_disponibilidad:
-            continue
-        for b in bloques:
-            key = (s.rut_profesor, _bloque_dia(b))
-            por_prof_dia[key]["bloques"].append(b)
-            if sec_id not in por_prof_dia[key]["secciones"]:
-                por_prof_dia[key]["secciones"].append(sec_id)
-
-    violaciones: list[dict] = []
-    for (rut, dia), data in por_prof_dia.items():
-        bloques_dia = data["bloques"]
-        if len(bloques_dia) < 2:
-            continue
-
-        ordenados = sorted(bloques_dia, key=lambda b: _hora_a_min(TODOS_BLOQUES[b].hora_inicio))
-        huecos = []
-        for k in range(len(ordenados) - 1):
-            fin_k     = _hora_a_min(TODOS_BLOQUES[ordenados[k]].hora_fin)
-            inicio_k1 = _hora_a_min(TODOS_BLOQUES[ordenados[k + 1]].hora_inicio)
-            hueco_min = inicio_k1 - fin_k
-            if hueco_min > _MIN_VENTANA:
-                huecos.append((ordenados[k], ordenados[k + 1], hueco_min))
-
-        if not huecos:
-            continue
-
-        prof = datos.profesores.get(rut)
-        nombre = (prof.nombre if prof.nombre else prof.rut) if prof else rut
-        dia_label = _DIA_LABEL.get(dia, dia)
-
-        infos = [
-            _sec_info(sec_by_id[sid], datos)
-            for sid in data["secciones"]
-            if sec_by_id.get(sid)
-        ]
-
-        for b1, b2, mins in huecos:
-            bloques_str = [_bloque_str(b1), _bloque_str(b2)]
-            msg = (
-                f"Prof. {nombre}: ventana de {mins} min el {dia_label} "
-                f"entre {_bloque_str(b1)} y {_bloque_str(b2)}"
-            )
-            violaciones.append(_viol(
-                "RB5", "Ventana en horario de profesor", msg,
-                infos, bloques_str,
-                f"Prof. {nombre} — {dia_label}",
-                penalizacion=PESOS_RB["RB5"],
-            ))
-
-    return violaciones
 
 # ---------------------------------------------------------------------------
 # Función principal
@@ -547,15 +531,16 @@ def generar_reporte_detallado(
     """
     duras: list[dict] = []
     duras.extend(_rd1(datos, asignaciones))
+    duras.extend(_rd2(datos, asignaciones))
     duras.extend(_rd3(datos, asignaciones))
     duras.extend(_rd4(datos, asignaciones))
+    duras.extend(_rd7(datos, asignaciones))
 
     blandas: list[dict] = []
     blandas.extend(_rb1(datos, asignaciones))
     blandas.extend(_rb2(datos, asignaciones))
     blandas.extend(_rb3(datos, asignaciones))
     blandas.extend(_rb4(datos, asignaciones))
-    blandas.extend(_rb5(datos, asignaciones))
 
     por_tipo_dura: dict[str, int] = {}
     for v in duras:
