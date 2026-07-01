@@ -38,9 +38,11 @@ Objetivo: minimizar el uso de bloques helper (preferir la grilla institucional e
 
 Solapamiento: verificado por sub-bloques (MATRIZ_SOLAPAMIENTO), NO por igualdad de índice.
 
-Fallback: si CP-SAT retorna INFEASIBLE, resolver_con_fallback() relaja restricciones
-progresivamente hasta encontrar alguna solución parcial que pueda pasar al GA y al
-reporter (las violaciones se documentan en el reporte final).
+Sin relajación automática: el modelo se resuelve SIEMPRE con todas las restricciones duras.
+Si CP-SAT retorna INFEASIBLE, NO se relaja nada — la causa se diagnostica aparte
+(app/core/diagnostico.py) y se guía al usuario a resolverla. Los parámetros usar_rd2/
+usar_rd3/usar_rd4 existen solo para que el módulo de diagnóstico pueda aislar, mediante
+pruebas internas que nunca se devuelven al usuario, qué restricción provoca el conflicto.
 """
 from __future__ import annotations
 
@@ -80,9 +82,6 @@ class ResultadoSolver:
     n_rd4: int = 0
     n_rd7: int = 0   # RD7 va en el dominio de las AYUD → 0
     n_rd8: int = 0   # no usado en el modelo actual
-    # Campos de fallback: indican si se relajaron restricciones para obtener la solución.
-    nivel_relajacion: int = 0        # 0 = solución completa; >0 = restricciones relajadas
-    advertencia_relajacion: str = "" # mensaje para mostrar en el frontend
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +165,6 @@ def resolver(
     usar_rd2: bool = True,
     usar_rd3: bool = True,
     usar_rd4: bool = True,
-    _forzar_rd1: bool = True,
 ) -> ResultadoSolver:
     """
     Asigna bloques a nivel de SECCIÓN.
@@ -176,8 +174,8 @@ def resolver(
              AYUD solo desde 12:30 (RD7, siempre activo).
       intra — los bloques de una sección no se solapan entre sí (siempre activo).
       NRC  — componentes de la misma sección no se solapan (siempre activo).
-      RD1  — secciones de cursos DISTINTOS del mismo (carrera, semestre) no se solapan.
-             Controlado por _forzar_rd1 (True por defecto; False solo en último fallback).
+      RD1  — secciones de cursos DISTINTOS del mismo (carrera, semestre) no se solapan
+             (siempre activo).
       RD3  — un profesor no dicta dos secciones a la vez. Controlado por usar_rd3.
       RD4  — capacidad de salas especiales. Controlado por usar_rd4.
 
@@ -248,28 +246,27 @@ def resolver(
                 if grp[i].componente != grp[j].componente:
                     n_rc += _nover(x[grp[i].id], x[grp[j].id])
 
-    # RD1: cursos DISTINTOS del mismo (carrera, semestre) no se solapan
+    # RD1: cursos DISTINTOS del mismo (carrera, semestre) no se solapan (siempre activo)
     n_rd1 = 0
-    if _forzar_rd1:
-        vistos_rd1: set[frozenset] = set()
-        for carrera in carreras:
-            por_sem: dict[str, list] = defaultdict(list)
-            for s in secciones:
-                curso = datos.cursos.get(s.codigo_curso)
-                if not curso:
-                    continue
-                for sem in curso.semestres_por_carrera.get(carrera, set()):
-                    por_sem[sem].append(s)
-            for grp in por_sem.values():
-                for i in range(len(grp)):
-                    for j in range(i + 1, len(grp)):
-                        if grp[i].codigo_curso == grp[j].codigo_curso:
-                            continue
-                        par = frozenset((grp[i].id, grp[j].id))
-                        if par in vistos_rd1:
-                            continue
-                        vistos_rd1.add(par)
-                        n_rd1 += _nover(x[grp[i].id], x[grp[j].id])
+    vistos_rd1: set[frozenset] = set()
+    for carrera in carreras:
+        por_sem: dict[str, list] = defaultdict(list)
+        for s in secciones:
+            curso = datos.cursos.get(s.codigo_curso)
+            if not curso:
+                continue
+            for sem in curso.semestres_por_carrera.get(carrera, set()):
+                por_sem[sem].append(s)
+        for grp in por_sem.values():
+            for i in range(len(grp)):
+                for j in range(i + 1, len(grp)):
+                    if grp[i].codigo_curso == grp[j].codigo_curso:
+                        continue
+                    par = frozenset((grp[i].id, grp[j].id))
+                    if par in vistos_rd1:
+                        continue
+                    vistos_rd1.add(par)
+                    n_rd1 += _nover(x[grp[i].id], x[grp[j].id])
 
     # RD3: un profesor no dicta dos secciones a la vez
     n_rd3 = 0
@@ -367,77 +364,6 @@ def resolver(
         n_rd3=n_rd3, n_rd4=n_rd4, n_rd7=n_rd7, n_rd8=n_rd8,
     )
 
-
-# ---------------------------------------------------------------------------
-# Fallback progresivo — función principal a usar desde routes.py
-# ---------------------------------------------------------------------------
-
-def resolver_con_fallback(
-    datos: DatosProblema,
-    carreras: list[str] | None = None,
-    tiempo_limite_s: float = 60.0,
-) -> ResultadoSolver:
-    """
-    Orden de relajación revisado: RD2 (disponibilidad, negociable con el profesor)
-    se relaja ANTES que RD3 (unicidad física) y RD4 (capacidad física).
-
-      Nivel 0 — Completo (RD1 + RD2 + RD3 + RD4)
-      Nivel 1 — Sin RD4 (salas especiales)
-      Nivel 2 — Sin RD2 (disponibilidad del profesor)
-      Nivel 3 — Sin RD2 ni RD4
-      Nivel 4 — Sin RD2 ni RD3 ni RD4  ← antes era nivel 4, ahora RD3 cae aquí
-      Nivel 5 — Solo intra + NRC (emergencia total)
-    """
-    niveles: list[dict] = [
-        dict(usar_rd2=True,  usar_rd3=True,  usar_rd4=True,  forzar_rd1=True,
-             label="Solución completa (todas las restricciones)"),
-        dict(usar_rd2=True,  usar_rd3=True,  usar_rd4=False, forzar_rd1=True,
-             label="Sin salas especiales (RD4 relajada)"),
-        dict(usar_rd2=False, usar_rd3=True,  usar_rd4=True,  forzar_rd1=True,
-             label="Sin disponibilidad de profesor (RD2 relajada) — consultar al profesor"),
-        dict(usar_rd2=False, usar_rd3=True,  usar_rd4=False, forzar_rd1=True,
-             label="Sin RD2 ni RD4 — solo topes de malla y unicidad de profesor"),
-        dict(usar_rd2=False, usar_rd3=False, usar_rd4=False, forzar_rd1=True,
-             label="Sin RD2, RD3 ni RD4 — solo topes de malla (solución de emergencia)"),
-        dict(usar_rd2=False, usar_rd3=False, usar_rd4=False, forzar_rd1=False,
-             label="Sin restricciones inter-sección — solución de último recurso"),
-    ]
-
-    for nivel, params in enumerate(niveles):
-        if nivel > 0:
-            print(f"[FALLBACK nivel {nivel}] Reintentando CP-SAT: {params['label']}")
-
-        resultado = resolver(
-            datos,
-            carreras=carreras,
-            tiempo_limite_s=tiempo_limite_s,
-            usar_rd2=params["usar_rd2"],
-            usar_rd3=params["usar_rd3"],
-            usar_rd4=params["usar_rd4"],
-            _forzar_rd1=params["forzar_rd1"],
-        )
-
-        if resultado.estado in ("OPTIMAL", "FEASIBLE"):
-            resultado.nivel_relajacion = nivel
-            if nivel == 0:
-                resultado.advertencia_relajacion = ""
-            else:
-                resultado.advertencia_relajacion = (
-                    f"⚠ Solución parcial (nivel {nivel}/5): {params['label']}. "
-                    "Las restricciones omitidas aparecerán como violaciones en el reporte."
-                )
-                print(f"[FALLBACK] ✓ Solución encontrada en nivel {nivel}: {params['label']}")
-            return resultado
-
-    # Nunca debería llegar aquí, pero retornamos INFEASIBLE limpio si ocurre.
-    print("[FALLBACK] ✗ No se encontró solución en ningún nivel.")
-    ultimo = ResultadoSolver(estado="INFEASIBLE")
-    ultimo.nivel_relajacion = len(niveles)
-    ultimo.advertencia_relajacion = (
-        "❌ No se encontró ninguna solución. "
-        "Revisa los datos de disponibilidad y salas en el maestro."
-    )
-    return ultimo
 
 
 # ---------------------------------------------------------------------------
@@ -597,9 +523,6 @@ def imprimir_resultado(datos: DatosProblema, resultado: ResultadoSolver) -> None
     print("RESULTADO CP-SAT")
     print("=" * 60)
     print(f"Estado:               {resultado.estado}")
-    if resultado.nivel_relajacion > 0:
-        print(f"Nivel de relajación:  {resultado.nivel_relajacion}/5")
-        print(f"Advertencia:          {resultado.advertencia_relajacion}")
     print(f"Secciones asignadas:  {len(resultado.asignaciones)}")
     total_bloques = sum(len(b) for b in resultado.asignaciones.values())
     print(f"Bloques totales:      {total_bloques}")

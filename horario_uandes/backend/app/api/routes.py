@@ -25,7 +25,7 @@ from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
 from ..core.parser import cargar_datos
 from ..core.reporter import generar_reporte_detallado
-from ..core.solver_cpsat import resolver_con_fallback          # ← usa el fallback
+from ..core.solver_cpsat import resolver
 from ..core.solver_ga import (
     PESOS,
     calcular_fitness,
@@ -64,7 +64,6 @@ _state: dict = {
     "reporte":                 None,     # dict (salida de generar_reporte_detallado)
     "excel_bytes":             None,     # bytes
     "datos":                   None,     # DatosProblema
-    "advertencia_relajacion":  "",       # mensaje de fallback para el frontend
 }
 _lock     = asyncio.Lock()
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -85,30 +84,24 @@ def _solve_sync(req: SolveRequest) -> None:
         _state["datos"] = datos
 
         _set_progress("Ejecutando CP-SAT…")
-        # resolver_con_fallback intenta en hasta 6 niveles de relajación;
-        # nunca lanza excepción por INFEASIBLE — siempre devuelve algo.
-        resultado_cpsat = resolver_con_fallback(
+        # Sin relajación automática: se resuelve con TODAS las restricciones duras.
+        # Si el modelo es INFEASIBLE, no se inventa un horario — se reporta la causa.
+        # (El horario parcial + diagnóstico accionable llegan en fases posteriores.)
+        resultado_cpsat = resolver(
             datos,
             carreras=req.carreras,
             tiempo_limite_s=req.tiempo_limite_cpsat,
         )
 
         if resultado_cpsat.estado not in ("OPTIMAL", "FEASIBLE"):
-            # Solo falla si ni el nivel más relajado encontró solución (muy raro).
             raise RuntimeError(
-                "CP-SAT no encontró solución ni siquiera con restricciones mínimas. "
-                "Revisa los datos de disponibilidad en el maestro."
+                "No existe un horario que respete todas las restricciones para la "
+                "selección actual (CP-SAT: INFEASIBLE). El sistema no relaja "
+                "restricciones automáticamente: revisa la disponibilidad de los "
+                "profesores y la capacidad de salas para identificar el conflicto."
             )
 
-        # Guardar la advertencia de relajación para devolverla al frontend.
-        _state["advertencia_relajacion"] = resultado_cpsat.advertencia_relajacion
-        if resultado_cpsat.nivel_relajacion > 0:
-            _set_progress(
-                f"CP-SAT: solución parcial nivel {resultado_cpsat.nivel_relajacion}/5. "
-                "Ejecutando GA…"
-            )
-        else:
-            _set_progress(f"CP-SAT: {resultado_cpsat.estado}. Ejecutando GA…")
+        _set_progress(f"CP-SAT: {resultado_cpsat.estado}. Ejecutando GA…")
 
         resultado_ga = ejecutar_ga(
             datos,
@@ -149,8 +142,6 @@ def _solve_sync(req: SolveRequest) -> None:
             "n_secciones":            len(asignaciones),
             "n_bloques_totales":      n_bloques_totales,
             "estado_cpsat":           resultado_cpsat.estado,
-            "nivel_relajacion":       resultado_cpsat.nivel_relajacion,
-            "advertencia_relajacion": resultado_cpsat.advertencia_relajacion,
         }
 
         _set_progress("Generando Excel…")
@@ -316,7 +307,6 @@ async def solve(req: SolveRequest, background_tasks: BackgroundTasks):
         _state["metricas"]               = None
         _state["reporte"]                = None
         _state["excel_bytes"]            = None
-        _state["advertencia_relajacion"] = ""
 
     background_tasks.add_task(_solve_background, req)
     return {"detail": "Solver iniciado"}
@@ -348,8 +338,6 @@ def get_results():
         n_secciones=metricas_raw["n_secciones"],
         n_bloques_totales=metricas_raw["n_bloques_totales"],
         estado_cpsat=metricas_raw["estado_cpsat"],
-        nivel_relajacion=metricas_raw.get("nivel_relajacion", 0),
-        advertencia_relajacion=metricas_raw.get("advertencia_relajacion", ""),
     )
     reporte = _build_reporte(_state["reporte"]) if _state["reporte"] else None
     return SolveResult(metricas=metricas, secciones=secciones, reporte=reporte)
