@@ -43,9 +43,6 @@ class MetricasResult(BaseModel):
     n_secciones: int
     n_bloques_totales: int
     estado_cpsat: str
-    # Campos de fallback: presentes cuando CP-SAT no encontró solución completa.
-    nivel_relajacion: int = 0
-    advertencia_relajacion: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -85,10 +82,38 @@ class ReporteDetallado(BaseModel):
     violaciones_blandas: list[ViolacionItem]
 
 
+# ---------------------------------------------------------------------------
+# Diagnóstico (cuando no hay horario completo factible)
+# ---------------------------------------------------------------------------
+
+class SugerenciaItem(BaseModel):
+    causa: str                              # "2mas1_sin_par", "RD2", "contencion", ...
+    severidad: str                          # "alta" | "media"
+    mensaje: str                            # explicación legible
+    acciones: list[str] = Field(default_factory=list)
+    secciones: list[str] = Field(default_factory=list)
+    profesores: list[str] = Field(default_factory=list)
+    bloques: list[str] = Field(default_factory=list)
+
+
+class DiagnosticoUnidadItem(BaseModel):
+    carrera: str
+    semestre: str
+    causa_principal: str
+    sugerencias: list[SugerenciaItem] = Field(default_factory=list)
+
+
+class DiagnosticoResult(BaseModel):
+    unidades: list[DiagnosticoUnidadItem] = Field(default_factory=list)
+
+
 class SolveResult(BaseModel):
-    metricas: MetricasResult
-    secciones: list[SeccionAsignada]
+    # FACTIBLE (horario completo) | PARCIAL (subconjunto + diagnóstico) | INFEASIBLE (solo diagnóstico)
+    estado: str = "FACTIBLE"
+    metricas: Optional[MetricasResult] = None
+    secciones: list[SeccionAsignada] = Field(default_factory=list)
     reporte: Optional[ReporteDetallado] = None
+    diagnostico: Optional[DiagnosticoResult] = None
 
 
 # ---------------------------------------------------------------------------

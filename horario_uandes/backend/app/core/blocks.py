@@ -36,10 +36,10 @@ _BLOQUES_DEF: list[tuple[str, str, str, bool]] = [
     # ── 5 bloques de 2h ESTÁNDAR ──
     ("8:30",  "10:20", "2h", True),
     ("10:30", "12:20", "2h", True),
-    ("13:30", "15:20", "2h", True),   # primer bloque de tarde, tras el almuerzo
+    ("13:30", "15:20", "2h", True),
     ("15:30", "17:20", "2h", True),
     ("17:30", "19:20", "2h", True),
-    # ── 2 bloques de 3h ESTÁNDAR (cruzan el horario de almuerzo) ──
+    # ── 2 bloques de 3h ESTÁNDAR ──
     ("10:30", "13:20", "3h", True),   # sub-bloques: 10:30, 11:30, 12:30
     ("12:30", "15:20", "3h", True),   # sub-bloques: 12:30, 13:30, 14:30
     # ── bloques de 2h HELPER (rellenan los inicios 9:30, 11:30, 12:30, 14:30, 16:30) ──

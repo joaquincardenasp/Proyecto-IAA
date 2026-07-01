@@ -574,6 +574,10 @@ export default function HorarioGrid({
             {TIPO_LABEL[t]}
           </span>
         ))}
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm border-2 border-dashed border-amber-500" />
+          Sin ubicar (arrástrala a un horario)
+        </span>
         <span className="text-gray-400">
           · Cada fila es un sub-bloque de 50 min; la altura del curso indica su
           duración
@@ -624,6 +628,7 @@ function GroupBlock({
             ${selected?.id === sec.id ? "ring-1 ring-inset ring-gray-400 shadow-sm" : "hover:brightness-95"}
             ${editable ? "cursor-grab active:cursor-grabbing" : ""}
             ${seccionesConViolacion?.has(sec.id) ? "outline outline-2 outline-red-500" : ""}
+            ${sec.tentativa ? "outline outline-2 outline-dashed outline-amber-500" : ""}
           `}
         >
           {idx === 0 ? (
@@ -687,10 +692,14 @@ function SeccionCard({
         ${isSelected ? "ring-1 ring-inset ring-gray-400 shadow-sm" : "hover:brightness-95"}
         ${editable ? "cursor-grab active:cursor-grabbing" : ""}
         ${violacion ? "outline outline-2 outline-red-500" : ""}
+        ${sec.tentativa ? "outline outline-2 outline-dashed outline-amber-500" : ""}
       `}
     >
       <span className="font-semibold block truncate leading-tight">
         {sec.codigo}-{sec.seccion}
+        {sec.tentativa && (
+          <span className="ml-1 text-amber-600 font-normal">· sin ubicar</span>
+        )}
       </span>
       <span className="block truncate text-[10px] opacity-75 leading-tight">
         {sec.titulo}

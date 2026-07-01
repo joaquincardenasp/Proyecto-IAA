@@ -38,9 +38,11 @@ Objetivo: minimizar el uso de bloques helper (preferir la grilla institucional e
 
 Solapamiento: verificado por sub-bloques (MATRIZ_SOLAPAMIENTO), NO por igualdad de índice.
 
-Fallback: si CP-SAT retorna INFEASIBLE, resolver_con_fallback() relaja restricciones
-progresivamente hasta encontrar alguna solución parcial que pueda pasar al GA y al
-reporter (las violaciones se documentan en el reporte final).
+Sin relajación automática: el modelo se resuelve SIEMPRE con todas las restricciones duras.
+Si CP-SAT retorna INFEASIBLE, NO se relaja nada — la causa se diagnostica aparte
+(app/core/diagnostico.py) y se guía al usuario a resolverla. Los parámetros usar_rd2/
+usar_rd3/usar_rd4 existen solo para que el módulo de diagnóstico pueda aislar, mediante
+pruebas internas que nunca se devuelven al usuario, qué restricción provoca el conflicto.
 """
 from __future__ import annotations
 
@@ -79,10 +81,34 @@ class ResultadoSolver:
     n_rd4: int = 0
     n_rd7: int = 0
     n_rd8: int = 0
-    n_rd2_violado: int = 0         
+    n_rd2_violado: int = 0
     nivel_relajacion: int = 0
     advertencia_relajacion: str = ""
 
+
+@dataclass
+class UnidadBloqueada:
+    """Una unidad (carrera, semestre) que no se pudo colocar en la resolución por partes."""
+    carrera: str
+    semestre: str
+    secciones: list[str] = field(default_factory=list)  # ids de secciones no colocadas
+
+
+@dataclass
+class ResultadoParcial:
+    """
+    Resultado de resolver_por_partes.
+
+    estado:
+      FACTIBLE   — el modelo completo se resolvió con todas las restricciones duras.
+      PARCIAL    — el modelo completo era INFEASIBLE; se colocó el subconjunto de unidades
+                   factibles (respetando TODAS las duras entre ellas) y quedaron unidades
+                   bloqueadas para diagnosticar.
+      INFEASIBLE — no se pudo colocar ninguna unidad.
+    """
+    estado: str = "UNKNOWN"
+    asignaciones: dict[str, list[int]] = field(default_factory=dict)  # solo lo colocado
+    bloqueadas: list[UnidadBloqueada] = field(default_factory=list)
 
 # ---------------------------------------------------------------------------
 # Precómputo
@@ -153,7 +179,69 @@ def disponibilidad_seccion(
         return {b for b in base if b in prof.disponibilidad}
     return base
 
+# ---------------------------------------------------------------------------
+# Ubicación tentativa para secciones bloqueadas (edición manual)
+# ---------------------------------------------------------------------------
 
+def _seleccionar_tentativo(
+    dom: list[int], n_nec: int, tipos: list[str] | None
+) -> list[int] | None:
+    """
+    Elige n_nec bloques del dominio `dom` que no se solapen entre sí, ignorando
+    restricciones cruzadas con otras secciones (RD1/RD3/RD4). Es una ubicación
+    "de partida" para que el usuario la reubique a mano en el editor — no es una
+    solución válida del horario completo.
+    """
+    if tipos and len(tipos) == n_nec:
+        filtros = {"1h": BLOQUES_1H, "2h": BLOQUES_2H_SET, "3h": BLOQUES_3H_SET}
+        elegidos: list[int] = []
+        for tipo in tipos:
+            filtro = filtros.get(tipo)
+            candidatos = [
+                b for b in dom
+                if (filtro is None or b in filtro)
+                and all(not MATRIZ_SOLAPAMIENTO[b][c] for c in elegidos)
+            ]
+            if not candidatos:
+                return None
+            elegidos.append(candidatos[0])
+        return elegidos
+
+    ordenados = sorted(dom, key=lambda b: max(TODOS_BLOQUES[b].sub_bloques))
+    elegidos: list[int] = []
+    for b in ordenados:
+        if len(elegidos) >= n_nec:
+            break
+        if all(not MATRIZ_SOLAPAMIENTO[b][c] for c in elegidos):
+            elegidos.append(b)
+    return elegidos if len(elegidos) == n_nec else None
+
+
+def ubicar_tentativo(
+    datos: DatosProblema, secciones: list
+) -> dict[str, list[int]]:
+    """
+    Para secciones que NO se pudieron colocar en resolver_por_partes, calcula una
+    ubicación tentativa: respeta la disponibilidad propia de la sección (RD2) y que
+    sus propios bloques no se solapen entre sí, pero IGNORA restricciones cruzadas
+    con otras secciones (RD1/RD3/RD4) — es justamente lo que las bloqueó.
+
+    No es una solución válida del horario: es un punto de partida visual para que el
+    usuario las vea en el editor manual y las reubique arrastrándolas. Si ni siquiera
+    existe una ubicación tentativa (dominio vacío o insuficiente para sus bloques
+    necesarios), la sección queda sin bloques y no se expone en el grid.
+    """
+    out: dict[str, list[int]] = {}
+    for s in secciones:
+        dom = sorted(disponibilidad_seccion(datos, s))
+        if not dom:
+            continue
+        elegidos = _seleccionar_tentativo(
+            dom, s.cantidad_bloques_necesarios, s.tipos_bloques_necesarios
+        )
+        if elegidos:
+            out[s.id] = elegidos
+    return out
 # ---------------------------------------------------------------------------
 # Función principal del solver
 # ---------------------------------------------------------------------------
@@ -166,7 +254,8 @@ def resolver(
     peso_rd2_suave: int = 0,   
     usar_rd3: bool = True,
     usar_rd4: bool = True,
-    _forzar_rd1: bool = True,
+    secciones: list | None = None,
+    fijadas: dict[str, list[int]] | None = None,
 ) -> ResultadoSolver:
     """
     Asigna bloques a nivel de SECCIÓN.
@@ -176,32 +265,54 @@ def resolver(
              AYUD solo desde 12:30 (RD7, siempre activo).
       intra — los bloques de una sección no se solapan entre sí (siempre activo).
       NRC  — componentes de la misma sección no se solapan (siempre activo).
-      RD1  — secciones de cursos DISTINTOS del mismo (carrera, semestre) no se solapan.
-             Controlado por _forzar_rd1 (True por defecto; False solo en último fallback).
+      RD1  — secciones de cursos DISTINTOS del mismo (carrera, semestre) no se solapan
+             (siempre activo).
       RD3  — un profesor no dicta dos secciones a la vez. Controlado por usar_rd3.
       RD4  — capacidad de salas especiales. Controlado por usar_rd4.
+
+    Parámetros para resolución incremental (usados por resolver_por_partes):
+      secciones — conjunto explícito de secciones a modelar. Si es None, se derivan de
+                  `carreras` (comportamiento por defecto, idéntico al histórico).
+      fijadas   — {sec_id: [bloques]} de secciones ya colocadas en unidades previas. Se
+                  incluyen en el modelo con dominio fijo (pinneadas) para que las secciones
+                  activas respeten RD1/RD3/RD4 contra ellas. NO se devuelven en el resultado.
 
     Objetivo: minimizar bloques helper (preferir la grilla estándar).
     """
     if carreras is None:
         carreras = ["Plan Común"]
 
+    fijadas = fijadas or {}
+
     model = cp_model.CpModel()
 
-    codigos_restringidos = {
-        c.codigo
-        for c in datos.cursos.values()
-        if any(car in c.semestres_por_carrera for car in carreras)
-    }
-    secciones = [s for s in datos.secciones if s.codigo_curso in codigos_restringidos]
+    if secciones is None:
+        codigos_restringidos = {
+            c.codigo
+            for c in datos.cursos.values()
+            if any(car in c.semestres_por_carrera for car in carreras)
+        }
+        secciones = [s for s in datos.secciones if s.codigo_curso in codigos_restringidos]
 
-    # Variables por sección (dominio = disponibilidad de la sección)
+    fijas_ids = set(fijadas)
+
+    # Variables por sección (dominio = disponibilidad; las fijadas van pinneadas).
     dom_de: dict[str, list[int]] = {}
     dom_pref_de: dict[str, list[int]] = {}   # ← NUEVO: solo se usa si peso_rd2_suave > 0
     x: dict[str, list[cp_model.IntVar]] = {}
     rd2_indicators: list[cp_model.IntVar] = []   # ← NUEVO
 
     for s in secciones:
+        if s.id in fijas_ids:
+            # Sección ya colocada: variables con dominio de un solo valor (constante).
+            bloques_fijos = fijadas[s.id]
+            dom_de[s.id] = list(bloques_fijos)
+            x[s.id] = [
+                model.NewIntVarFromDomain(cp_model.Domain.FromValues([b]), f"{s.id}_fix{k}")
+                for k, b in enumerate(bloques_fijos)
+            ]
+            continue
+
         if peso_rd2_suave > 0:
             # Dominio SIN restringir por disponibilidad (CP-SAT puede usar cualquier bloque
             # de la duración correcta); la disponibilidad real se guarda aparte para penalizar.
@@ -240,17 +351,22 @@ def resolver(
 
         x[s.id] = vars_seccion
 
-    def _nover(a_vars, b_vars) -> int:
+    def _nover(a_id, b_id) -> int:
+        # No genera restricciones entre dos secciones ya fijadas (redundante).
+        if a_id in fijas_ids and b_id in fijas_ids:
+            return 0
         c = 0
-        for v1 in a_vars:
-            for v2 in b_vars:
+        for v1 in x[a_id]:
+            for v2 in x[b_id]:
                 model.AddForbiddenAssignments([v1, v2], _PARES_SOLAPAN)
                 c += 1
         return c
 
-    # Intra-sección (siempre activo)
+    # Intra-sección (siempre activo; innecesario para las pinneadas)
     n_intra = 0
     for s in secciones:
+        if s.id in fijas_ids:
+            continue
         v = x[s.id]
         for k1 in range(len(v)):
             for k2 in range(k1 + 1, len(v)):
@@ -266,30 +382,29 @@ def resolver(
         for i in range(len(grp)):
             for j in range(i + 1, len(grp)):
                 if grp[i].componente != grp[j].componente:
-                    n_rc += _nover(x[grp[i].id], x[grp[j].id])
+                    n_rc += _nover(grp[i].id, grp[j].id)
 
-    # RD1: cursos DISTINTOS del mismo (carrera, semestre) no se solapan
+    # RD1: cursos DISTINTOS del mismo (carrera, semestre) no se solapan (siempre activo)
     n_rd1 = 0
-    if _forzar_rd1:
-        vistos_rd1: set[frozenset] = set()
-        for carrera in carreras:
-            por_sem: dict[str, list] = defaultdict(list)
-            for s in secciones:
-                curso = datos.cursos.get(s.codigo_curso)
-                if not curso:
-                    continue
-                for sem in curso.semestres_por_carrera.get(carrera, set()):
-                    por_sem[sem].append(s)
-            for grp in por_sem.values():
-                for i in range(len(grp)):
-                    for j in range(i + 1, len(grp)):
-                        if grp[i].codigo_curso == grp[j].codigo_curso:
-                            continue
-                        par = frozenset((grp[i].id, grp[j].id))
-                        if par in vistos_rd1:
-                            continue
-                        vistos_rd1.add(par)
-                        n_rd1 += _nover(x[grp[i].id], x[grp[j].id])
+    vistos_rd1: set[frozenset] = set()
+    for carrera in carreras:
+        por_sem: dict[str, list] = defaultdict(list)
+        for s in secciones:
+            curso = datos.cursos.get(s.codigo_curso)
+            if not curso:
+                continue
+            for sem in curso.semestres_por_carrera.get(carrera, set()):
+                por_sem[sem].append(s)
+        for grp in por_sem.values():
+            for i in range(len(grp)):
+                for j in range(i + 1, len(grp)):
+                    if grp[i].codigo_curso == grp[j].codigo_curso:
+                        continue
+                    par = frozenset((grp[i].id, grp[j].id))
+                    if par in vistos_rd1:
+                        continue
+                    vistos_rd1.add(par)
+                    n_rd1 += _nover(grp[i].id, grp[j].id)
 
     # RD3: un profesor no dicta dos secciones a la vez
     n_rd3 = 0
@@ -301,7 +416,7 @@ def resolver(
         for grp in por_prof.values():
             for i in range(len(grp)):
                 for j in range(i + 1, len(grp)):
-                    n_rd3 += _nover(x[grp[i].id], x[grp[j].id])
+                    n_rd3 += _nover(grp[i].id, grp[j].id)
 
     # RD4: capacidad de salas especiales
     n_rd4 = 0
@@ -320,8 +435,9 @@ def resolver(
             if cap == 1:
                 for i in range(len(ss)):
                     for j in range(i + 1, len(ss)):
-                        n_rd4 += _nover(x[ss[i].id], x[ss[j].id])
+                        n_rd4 += _nover(ss[i].id, ss[j].id)
             else:
+                # Las secciones fijadas cuentan para la capacidad (indicador pinneado).
                 for (dia, sub), blks in _COBERTURA_SUBBLOQUE.items():
                     blkset = set(blks)
                     inds = []
@@ -341,9 +457,11 @@ def resolver(
     n_rd7 = 0
     n_rd8 = 0
 
-    # Preferencia por la grilla estándar: minimizar uso de bloques helper.
+    # Preferencia por la grilla estándar: minimizar uso de bloques helper (solo activas).
     helper_indicators = []
     for s in secciones:
+        if s.id in fijas_ids:
+            continue
         helpers_dom = [h for h in BLOQUES_HELPER if h in dom_de[s.id]]
         if not helpers_dom:
             continue
@@ -375,9 +493,11 @@ def resolver(
             n_rd3=n_rd3, n_rd4=n_rd4, n_rd7=n_rd7, n_rd8=n_rd8,
         )
 
+    # Se devuelven solo las secciones activas (no las fijadas, ya conocidas).
     asignaciones = {
         sec_id: [solver.Value(v) for v in vars_]
         for sec_id, vars_ in x.items()
+        if sec_id not in fijas_ids
     }
 
     n_rd2_violado = sum(solver.Value(bi) for bi in rd2_indicators) if rd2_indicators else 0
@@ -391,81 +511,140 @@ def resolver(
     )
 
 # ---------------------------------------------------------------------------
-# Fallback progresivo — función principal a usar desde routes.py
+# Resolución por partes (horario parcial) — función principal desde routes.py
 # ---------------------------------------------------------------------------
 
-def resolver_con_fallback(
+def _sem_key(sem: str) -> tuple:
+    """Clave de orden para semestres tipo '1'..'12', '9a', '9f' (por nº y luego sufijo)."""
+    num = ""
+    for ch in str(sem):
+        if ch.isdigit():
+            num += ch
+        else:
+            break
+    return (int(num) if num else 999, str(sem))
+
+
+def _construir_unidades(datos: DatosProblema, secciones: list, carreras: list[str]) -> dict:
+    """
+    Agrupa secciones en unidades (carrera, semestre) — la granularidad más fina que
+    preserva RD1. Una sección puede caer en varias unidades (curso presente en varias
+    carreras/semestres); resolver_por_partes la coloca en la primera y la fija en las demás.
+    """
+    unidades: dict[tuple[str, str], list] = defaultdict(list)
+    for s in secciones:
+        curso = datos.cursos.get(s.codigo_curso)
+        if not curso:
+            continue
+        for carrera in carreras:
+            for sem in curso.semestres_por_carrera.get(carrera, set()):
+                unidades[(carrera, sem)].append(s)
+    return unidades
+
+
+def _fijas_relevantes(datos, activas, asignaciones, sec_by_id, carrera, sem) -> set:
+    """
+    Secciones ya colocadas que interactúan con las activas por una restricción dura que
+    cruza unidades: RD3 (mismo profesor), RD4 (misma sala especial) o RD1 (misma
+    carrera+semestre). Solo estas necesitan incluirse como fijadas en el modelo de la unidad.
+    """
+    profs = {s.rut_profesor for s in activas if s.afecta_disponibilidad and s.rut_profesor}
+    salas = set()
+    for s in activas:
+        if s.componente != TipoReunion.AYUD:
+            curso = datos.cursos.get(s.codigo_curso)
+            if curso and curso.sala_especial:
+                salas.add(curso.sala_especial)
+
+    rel: set[str] = set()
+    for sid in asignaciones:
+        fs = sec_by_id.get(sid)
+        if not fs:
+            continue
+        curso = datos.cursos.get(fs.codigo_curso)
+        # RD3: mismo profesor
+        if fs.afecta_disponibilidad and fs.rut_profesor in profs:
+            rel.add(sid)
+            continue
+        # RD4: misma sala especial
+        if fs.componente != TipoReunion.AYUD and curso and curso.sala_especial in salas:
+            rel.add(sid)
+            continue
+        # RD1: comparte (carrera, semestre) con la unidad actual
+        if curso and sem in curso.semestres_por_carrera.get(carrera, set()):
+            rel.add(sid)
+    return rel
+
+
+def resolver_por_partes(
     datos: DatosProblema,
     carreras: list[str] | None = None,
     tiempo_limite_s: float = 60.0,
-) -> ResultadoSolver:
+    tiempo_por_unidad_s: float | None = None,
+) -> ResultadoParcial:
     """
-      Nivel 0 — Completo (RD1 + RD2 duro + RD3 + RD4)
-      Nivel 1 — Sin RD4 (salas especiales)
-      Nivel 2 — RD2 SUAVE (peso alto): minimiza violaciones en vez de ignorarlas
-      Nivel 3 — RD2 suave + sin RD4
-      Nivel 4 — RD2 completamente apagado (último recurso antes de tocar RD3)
-      Nivel 5 — Sin RD2 ni RD4
-      Nivel 6 — Sin RD2, RD3 ni RD4
-      Nivel 7 — Sin restricciones inter-sección
+    Genera el mejor horario posible SIN relajar restricciones duras.
+
+      1. Intenta el modelo COMPLETO. Si es factible → FACTIBLE (horario total).
+      2. Si es INFEASIBLE, descompone en unidades (carrera, semestre) y las resuelve
+         incrementalmente: cada unidad respeta como FIJAS las secciones ya colocadas
+         (RD1/RD3/RD4 contra ellas). Las unidades que no entran se marcan bloqueadas.
+         El horario resultante (parcial) respeta TODAS las restricciones duras entre
+         las secciones colocadas — no se inventa ni se relaja nada.
+
+    Las unidades bloqueadas son el input del diagnóstico (Fase 2).
     """
-    niveles: list[dict] = [
-        dict(usar_rd2=True,  peso_rd2_suave=0,   usar_rd3=True, usar_rd4=True,  forzar_rd1=True,
-             label="Solución completa (todas las restricciones)"),
-        dict(usar_rd2=True,  peso_rd2_suave=0,   usar_rd3=True, usar_rd4=False, forzar_rd1=True,
-             label="Sin salas especiales (RD4 relajada)"),
-        dict(usar_rd2=True,  peso_rd2_suave=500, usar_rd3=True, usar_rd4=True,  forzar_rd1=True,
-             label="RD2 suave — minimizando violaciones de disponibilidad de profesor"),
-        dict(usar_rd2=True,  peso_rd2_suave=500, usar_rd3=True, usar_rd4=False, forzar_rd1=True,
-             label="RD2 suave + sin salas especiales"),
-        dict(usar_rd2=False, peso_rd2_suave=0,   usar_rd3=True, usar_rd4=True,  forzar_rd1=True,
-             label="Sin disponibilidad de profesor (RD2 apagada) — consultar al profesor"),
-        dict(usar_rd2=False, peso_rd2_suave=0,   usar_rd3=True, usar_rd4=False, forzar_rd1=True,
-             label="Sin RD2 ni RD4"),
-        dict(usar_rd2=False, peso_rd2_suave=0,   usar_rd3=False, usar_rd4=False, forzar_rd1=True,
-             label="Sin RD2, RD3 ni RD4 — solo topes de malla (emergencia)"),
-        dict(usar_rd2=False, peso_rd2_suave=0,   usar_rd3=False, usar_rd4=False, forzar_rd1=False,
-             label="Sin restricciones inter-sección — último recurso"),
-    ]
+    if carreras is None:
+        carreras = ["Plan Común"]
 
-    for nivel, params in enumerate(niveles):
-        if nivel > 0:
-            print(f"[FALLBACK nivel {nivel}] Reintentando CP-SAT: {params['label']}")
+    # 1. Intento completo
+    full = resolver(datos, carreras=carreras, tiempo_limite_s=tiempo_limite_s)
+    if full.estado in ("OPTIMAL", "FEASIBLE"):
+        return ResultadoParcial(estado="FACTIBLE", asignaciones=full.asignaciones)
 
-        resultado = resolver(
+    # 2. Descomposición por unidad (carrera, semestre)
+    codigos = {
+        c.codigo for c in datos.cursos.values()
+        if any(car in c.semestres_por_carrera for car in carreras)
+    }
+    todas = [s for s in datos.secciones if s.codigo_curso in codigos]
+    sec_by_id = {s.id: s for s in todas}
+    unidades = _construir_unidades(datos, todas, carreras)
+
+    claves = sorted(
+        unidades,
+        key=lambda k: (0 if k[0] == "Plan Común" else 1, k[0], _sem_key(k[1])),
+    )
+    if tiempo_por_unidad_s is None:
+        tiempo_por_unidad_s = max(10.0, tiempo_limite_s / max(1, len(claves)))
+
+    asignaciones: dict[str, list[int]] = {}
+    bloqueadas: list[UnidadBloqueada] = []
+
+    for carrera, sem in claves:
+        activas = [s for s in unidades[(carrera, sem)] if s.id not in asignaciones]
+        if not activas:
+            continue  # ya colocadas en unidades previas (curso compartido)
+
+        fijas_rel = _fijas_relevantes(datos, activas, asignaciones, sec_by_id, carrera, sem)
+        r = resolver(
             datos,
             carreras=carreras,
-            tiempo_limite_s=tiempo_limite_s,
-            usar_rd2=params["usar_rd2"],
-            peso_rd2_suave=params["peso_rd2_suave"],
-            usar_rd3=params["usar_rd3"],
-            usar_rd4=params["usar_rd4"],
-            _forzar_rd1=params["forzar_rd1"],
+            tiempo_limite_s=tiempo_por_unidad_s,
+            secciones=activas + [sec_by_id[sid] for sid in fijas_rel],
+            fijadas={sid: asignaciones[sid] for sid in fijas_rel},
         )
-
-        if resultado.estado in ("OPTIMAL", "FEASIBLE"):
-            resultado.nivel_relajacion = nivel
-            if nivel == 0:
-                resultado.advertencia_relajacion = ""
-            elif params["peso_rd2_suave"] > 0:
-                resultado.advertencia_relajacion = (
-                    f"⚠ Solución parcial (nivel {nivel}/{len(niveles)-1}): {params['label']}. "
-                    f"{resultado.n_rd2_violado} sección(es) quedaron fuera de la disponibilidad "
-                    f"declarada de su profesor (el mínimo posible dado el resto de restricciones)."
-                )
-            else:
-                resultado.advertencia_relajacion = (
-                    f"⚠ Solución parcial (nivel {nivel}/{len(niveles)-1}): {params['label']}. "
-                    "Las restricciones omitidas aparecerán como violaciones en el reporte."
-                )
-            print(f"[FALLBACK] ✓ Solución encontrada en nivel {nivel}: {params['label']}")
-            return resultado
-
-    ultimo = ResultadoSolver(estado="INFEASIBLE")
-    ultimo.nivel_relajacion = len(niveles)
-    ultimo.advertencia_relajacion = "❌ No se encontró ninguna solución."
-    return ultimo
-
+        if r.estado in ("OPTIMAL", "FEASIBLE"):
+            asignaciones.update(r.asignaciones)
+        else:
+            bloqueadas.append(
+                UnidadBloqueada(carrera=carrera, semestre=sem,
+                                secciones=[s.id for s in activas])
+            )
+    if not asignaciones:
+        return ResultadoParcial(estado="INFEASIBLE", bloqueadas=bloqueadas)
+    estado = "FACTIBLE" if not bloqueadas else "PARCIAL"
+    return ResultadoParcial(estado=estado, asignaciones=asignaciones, bloqueadas=bloqueadas)
 
 # ---------------------------------------------------------------------------
 # Verificación
@@ -624,9 +803,6 @@ def imprimir_resultado(datos: DatosProblema, resultado: ResultadoSolver) -> None
     print("RESULTADO CP-SAT")
     print("=" * 60)
     print(f"Estado:               {resultado.estado}")
-    if resultado.nivel_relajacion > 0:
-        print(f"Nivel de relajación:  {resultado.nivel_relajacion}/5")
-        print(f"Advertencia:          {resultado.advertencia_relajacion}")
     print(f"Secciones asignadas:  {len(resultado.asignaciones)}")
     total_bloques = sum(len(b) for b in resultado.asignaciones.values())
     print(f"Bloques totales:      {total_bloques}")
