@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { AlertCircle, Check, Download, Loader2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Check, Download, Loader2 } from "lucide-react";
 import { getStatus, getResults, EXPORT_URL } from "./api/client";
 import type { SolveResult, StatusResponse } from "./types";
 import SolverPanel from "./components/SolverPanel";
 import HorarioGrid from "./components/HorarioGrid";
 import MetricasPanel from "./components/MetricasPanel";
+import DiagnosticoPanel from "./components/DiagnosticoPanel";
 
-type Tab = "solver" | "horario" | "metricas";
+type Tab = "solver" | "horario" | "metricas" | "diagnostico";
 
 // ── Etapas del proceso ────────────────────────────────────────────────────────
 
@@ -17,7 +18,10 @@ const STAGES: { label: string; match: (p: string) => boolean }[] = [
   },
   {
     label: "Generando horario base",
-    match: (p) => p.includes("CP-SAT") && !p.includes("GA"),
+    match: (p) =>
+      p.includes("mejor horario") ||
+      p.includes("Diagnosticando") ||
+      (p.includes("CP-SAT") && !p.includes("GA")),
   },
   {
     label: "Optimizando (Alg. Genético)",
@@ -64,7 +68,8 @@ export default function App() {
           stopPolling();
           const r = await getResults();
           setResults(r);
-          setTab("horario");
+          // INFEASIBLE no tiene horario → abrir directo el diagnóstico.
+          setTab(r.estado === "INFEASIBLE" ? "diagnostico" : "horario");
         } else if (s.status === "error") {
           stopPolling();
         }
@@ -79,10 +84,15 @@ export default function App() {
   const isRunning = status.status === "running";
   const activeStage = isRunning ? progressToStage(status.progress) : 0;
 
+  const tieneHorario = !!results && results.secciones.length > 0;
+  const tieneDiagnostico = !!results?.diagnostico && results.diagnostico.unidades.length > 0;
+  const nBloqueadas = results?.diagnostico?.unidades.length ?? 0;
+
   const TABS: { id: Tab; label: string; disabled?: boolean }[] = [
     { id: "solver", label: "Generar horario" },
-    { id: "horario", label: "Horario", disabled: !results },
-    { id: "metricas", label: "Métricas", disabled: !results },
+    { id: "horario", label: "Horario", disabled: !tieneHorario },
+    { id: "metricas", label: "Métricas", disabled: !results?.metricas },
+    { id: "diagnostico", label: "Diagnóstico", disabled: !tieneDiagnostico },
   ];
 
   return (
@@ -115,7 +125,7 @@ export default function App() {
                 Procesando
               </span>
             )}
-            {results && (
+            {tieneHorario && (
               <a
                 href={EXPORT_URL}
                 download="horario_generado.xlsx"
@@ -150,12 +160,20 @@ export default function App() {
                   }`}
               >
                 {t.label}
-                {t.id === "horario" && results && (
+                {t.id === "horario" && tieneHorario && (
                   <span
                     className="ml-2 text-[11px] bg-gray-100 text-gray-500
                                    px-1.5 py-0.5 rounded font-normal tabular-nums"
                   >
-                    {results.secciones.length}
+                    {results!.secciones.length}
+                  </span>
+                )}
+                {t.id === "diagnostico" && tieneDiagnostico && (
+                  <span
+                    className="ml-2 text-[11px] bg-amber-100 text-amber-700
+                                   px-1.5 py-0.5 rounded font-medium tabular-nums"
+                  >
+                    {nBloqueadas}
                   </span>
                 )}
               </button>
@@ -245,19 +263,69 @@ export default function App() {
         </div>
       )}
 
+      {/* ── Banner de estado del resultado (PARCIAL / INFEASIBLE) ─────────────── */}
+      {results && results.estado !== "FACTIBLE" && status.status === "ready" && (
+        <div
+          className={`border-b px-6 py-2.5 shrink-0 ${
+            results.estado === "INFEASIBLE"
+              ? "bg-red-50 border-red-200"
+              : "bg-amber-50 border-amber-200"
+          }`}
+        >
+          <div
+            className={`max-w-screen-xl mx-auto flex items-center gap-2 text-sm ${
+              results.estado === "INFEASIBLE" ? "text-red-700" : "text-amber-700"
+            }`}
+          >
+            <AlertTriangle size={14} className="shrink-0" />
+            {results.estado === "INFEASIBLE" ? (
+              <span>
+                No fue posible generar un horario. Revisa el{" "}
+                <button
+                  onClick={() => setTab("diagnostico")}
+                  className="font-semibold underline underline-offset-2"
+                >
+                  diagnóstico
+                </button>{" "}
+                para ver la causa y las acciones sugeridas.
+              </span>
+            ) : (
+              <span>
+                Horario parcial: {results.secciones.length} secciones generadas.{" "}
+                {nBloqueadas} unidad{nBloqueadas !== 1 ? "es" : ""} sin ubicar —{" "}
+                <button
+                  onClick={() => setTab("diagnostico")}
+                  className="font-semibold underline underline-offset-2"
+                >
+                  ver diagnóstico
+                </button>
+                .
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Contenido ─────────────────────────────────────────────────────── */}
       <main className="flex-1 max-w-screen-xl mx-auto w-full px-6 py-8">
         {tab === "solver" && (
           <SolverPanel status={status} onSolveStarted={startPolling} />
         )}
-        {tab === "horario" && results && (
-          <HorarioGrid secciones={results.secciones} />
+        {tab === "horario" && tieneHorario && (
+          <HorarioGrid secciones={results!.secciones} />
         )}
-        {tab === "metricas" && results && (
+        {tab === "metricas" && results?.metricas && (
           <MetricasPanel
             metricas={results.metricas}
             secciones={results.secciones}
             reporte={results.reporte}
+          />
+        )}
+        {tab === "diagnostico" && results?.diagnostico && (
+          <DiagnosticoPanel
+            diagnostico={results.diagnostico}
+            estado={results.estado}
+            nColocadas={results.secciones.length}
           />
         )}
       </main>

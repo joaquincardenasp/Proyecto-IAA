@@ -63,10 +63,37 @@ export interface ReporteDetallado {
   violaciones_blandas: ViolacionItem[]
 }
 
+// ── Diagnóstico (cuando no hay horario completo factible) ──────────────────────
+
+export type EstadoSolve = 'FACTIBLE' | 'PARCIAL' | 'INFEASIBLE'
+
+export interface Sugerencia {
+  causa: string                    // "2mas1_sin_par" | "RD2" | "contencion" | ...
+  severidad: 'alta' | 'media'
+  mensaje: string
+  acciones: string[]
+  secciones: string[]
+  profesores: string[]
+  bloques: string[]
+}
+
+export interface DiagnosticoUnidad {
+  carrera: string
+  semestre: string
+  causa_principal: string
+  sugerencias: Sugerencia[]
+}
+
+export interface DiagnosticoResult {
+  unidades: DiagnosticoUnidad[]
+}
+
 export interface SolveResult {
-  metricas: MetricasResult
+  estado: EstadoSolve
+  metricas?: MetricasResult
   secciones: SeccionAsignada[]
   reporte?: ReporteDetallado
+  diagnostico?: DiagnosticoResult
 }
 
 export interface StatusResponse {
