@@ -24,8 +24,9 @@ from ..core.blocks import TODOS_BLOQUES
 from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
 from ..core.parser import cargar_datos
+from ..core.diagnostico import diagnosticar
 from ..core.reporter import generar_reporte_detallado
-from ..core.solver_cpsat import resolver
+from ..core.solver_cpsat import resolver_por_partes
 from ..core.solver_ga import (
     PESOS,
     calcular_fitness,
@@ -35,6 +36,8 @@ from ..core.solver_ga import (
 )
 from ..schemas.solve import (
     BloqueAsignado,
+    DiagnosticoResult,
+    DiagnosticoUnidadItem,
     MetricasResult,
     ReporteDetallado,
     ResumenReporte,
@@ -43,6 +46,7 @@ from ..schemas.solve import (
     SolveRequest,
     SolveResult,
     StatusResponse,
+    SugerenciaItem,
     ViolacionItem,
 )
 
@@ -59,9 +63,11 @@ _state: dict = {
     "status":                  "idle",   # idle | running | ready | error
     "progress":                "",
     "error":                   "",
+    "estado":                  "",       # FACTIBLE | PARCIAL | INFEASIBLE (resultado del solve)
     "asignaciones":            None,     # dict[str, list[int]]
     "metricas":                None,     # dict
     "reporte":                 None,     # dict (salida de generar_reporte_detallado)
+    "diagnostico":             None,     # Diagnostico (dataclass) o None
     "excel_bytes":             None,     # bytes
     "datos":                   None,     # DatosProblema
 }
@@ -83,86 +89,92 @@ def _solve_sync(req: SolveRequest) -> None:
         datos = cargar_datos(INPUTS_DIR)
         _state["datos"] = datos
 
-        _set_progress("Ejecutando CP-SAT…")
-        # Sin relajación automática: se resuelve con TODAS las restricciones duras.
-        # Si el modelo es INFEASIBLE, no se inventa un horario — se reporta la causa.
-        # (El horario parcial + diagnóstico accionable llegan en fases posteriores.)
-        resultado_cpsat = resolver(
+        _set_progress("Generando el mejor horario posible…")
+        # Sin relajación automática. resolver_por_partes entrega el horario COMPLETO si
+        # existe (FACTIBLE), o el subconjunto factible + unidades bloqueadas (PARCIAL), o
+        # nada colocable (INFEASIBLE). En ningún caso viola restricciones duras.
+        resultado = resolver_por_partes(
             datos,
             carreras=req.carreras,
             tiempo_limite_s=req.tiempo_limite_cpsat,
         )
+        asignaciones_cpsat = resultado.asignaciones
 
-        if resultado_cpsat.estado not in ("OPTIMAL", "FEASIBLE"):
-            raise RuntimeError(
-                "No existe un horario que respete todas las restricciones para la "
-                "selección actual (CP-SAT: INFEASIBLE). El sistema no relaja "
-                "restricciones automáticamente: revisa la disponibilidad de los "
-                "profesores y la capacidad de salas para identificar el conflicto."
+        # Diagnóstico accionable de las unidades que no se pudieron colocar.
+        diagnostico = None
+        if resultado.bloqueadas:
+            _set_progress("Diagnosticando conflictos…")
+            diagnostico = diagnosticar(datos, resultado, req.carreras)
+
+        metricas_api = None
+        reporte_raw = None
+        excel_bytes = None
+        asignaciones: dict = {}
+
+        # Solo optimizamos/exportamos si hay algo colocado (FACTIBLE o PARCIAL).
+        if asignaciones_cpsat:
+            _set_progress("Optimizando restricciones blandas (GA)…")
+            resultado_ga = ejecutar_ga(
+                datos,
+                asignaciones_cpsat,
+                n_generaciones=req.n_generaciones,
+                pop_size=req.pop_size,
+                seed=req.seed,
             )
+            asignaciones = resultado_ga.asignaciones
 
-        _set_progress(f"CP-SAT: {resultado_cpsat.estado}. Ejecutando GA…")
-
-        resultado_ga = ejecutar_ga(
-            datos,
-            resultado_cpsat.asignaciones,
-            n_generaciones=req.n_generaciones,
-            pop_size=req.pop_size,
-            seed=req.seed,
-        )
-
-        asignaciones = resultado_ga.asignaciones
-
-        _set_progress("Calculando métricas y reporte…")
-        ctx           = construir_contexto(datos, resultado_cpsat.asignaciones)
-        fitness_cpsat = calcular_fitness(encode(resultado_cpsat.asignaciones, ctx), ctx)[0]
-        fitness_ga    = resultado_ga.fitness_final
-        mejora_pct    = (
-            (fitness_cpsat - fitness_ga) / fitness_cpsat * 100
-            if fitness_cpsat > 0 else 0.0
-        )
-        n_bloques_totales = sum(len(b) for b in asignaciones.values())
-
-        reporte_raw = generar_reporte_detallado(datos, asignaciones)
-
-        pen_rb = reporte_raw["resumen"]["penalizacion_por_rb"]
-        metricas_dict = {
-            "fitness_cpsat": fitness_cpsat,
-            "fitness_ga":    fitness_ga,
-            "mejora_pct":    mejora_pct,
-            "rb_detalle": {
-                f"RB{k+1} (peso {v})": pen_rb.get(f"RB{k+1}", 0)
-                for k, v in enumerate(PESOS.values())
-            },
-        }
-        metricas_api = {
-            "fitness_cpsat":          fitness_cpsat,
-            "fitness_ga":             fitness_ga,
-            "mejora_pct":             mejora_pct,
-            "n_secciones":            len(asignaciones),
-            "n_bloques_totales":      n_bloques_totales,
-            "estado_cpsat":           resultado_cpsat.estado,
-        }
-
-        _set_progress("Generando Excel…")
-        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            excel_bytes = exportar_horario(
-                datos, asignaciones,
-                output_path=OUTPUTS_DIR / "horario_generado.xlsx",
-                metricas=metricas_dict,
-                reporte=reporte_raw,
+            _set_progress("Calculando métricas y reporte…")
+            ctx           = construir_contexto(datos, asignaciones_cpsat)
+            fitness_cpsat = calcular_fitness(encode(asignaciones_cpsat, ctx), ctx)[0]
+            fitness_ga    = resultado_ga.fitness_final
+            mejora_pct    = (
+                (fitness_cpsat - fitness_ga) / fitness_cpsat * 100
+                if fitness_cpsat > 0 else 0.0
             )
-        except PermissionError:
-            excel_bytes = exportar_horario(
-                datos, asignaciones,
-                metricas=metricas_dict,
-                reporte=reporte_raw,
-            )
+            n_bloques_totales = sum(len(b) for b in asignaciones.values())
 
+            reporte_raw = generar_reporte_detallado(datos, asignaciones)
+
+            pen_rb = reporte_raw["resumen"]["penalizacion_por_rb"]
+            metricas_dict = {
+                "fitness_cpsat": fitness_cpsat,
+                "fitness_ga":    fitness_ga,
+                "mejora_pct":    mejora_pct,
+                "rb_detalle": {
+                    f"RB{k+1} (peso {v})": pen_rb.get(f"RB{k+1}", 0)
+                    for k, v in enumerate(PESOS.values())
+                },
+            }
+            metricas_api = {
+                "fitness_cpsat":          fitness_cpsat,
+                "fitness_ga":             fitness_ga,
+                "mejora_pct":             mejora_pct,
+                "n_secciones":            len(asignaciones),
+                "n_bloques_totales":      n_bloques_totales,
+                "estado_cpsat":           resultado.estado,
+            }
+
+            _set_progress("Generando Excel…")
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                excel_bytes = exportar_horario(
+                    datos, asignaciones,
+                    output_path=OUTPUTS_DIR / "horario_generado.xlsx",
+                    metricas=metricas_dict,
+                    reporte=reporte_raw,
+                )
+            except PermissionError:
+                excel_bytes = exportar_horario(
+                    datos, asignaciones,
+                    metricas=metricas_dict,
+                    reporte=reporte_raw,
+                )
+
+        _state["estado"]       = resultado.estado
         _state["asignaciones"] = asignaciones
         _state["metricas"]     = metricas_api
         _state["reporte"]      = reporte_raw
+        _state["diagnostico"]  = diagnostico
         _state["excel_bytes"]  = excel_bytes
         _state["status"]       = "ready"
         _state["progress"]     = "Completado"
@@ -252,6 +264,32 @@ def _build_reporte(reporte_raw: dict) -> ReporteDetallado:
     )
 
 
+def _build_diagnostico(diag) -> DiagnosticoResult:
+    """Convierte el dataclass Diagnostico (core) al schema Pydantic de la API."""
+    return DiagnosticoResult(
+        unidades=[
+            DiagnosticoUnidadItem(
+                carrera=u.carrera,
+                semestre=u.semestre,
+                causa_principal=u.causa_principal,
+                sugerencias=[
+                    SugerenciaItem(
+                        causa=s.causa,
+                        severidad=s.severidad,
+                        mensaje=s.mensaje,
+                        acciones=s.acciones,
+                        secciones=s.secciones,
+                        profesores=s.profesores,
+                        bloques=s.bloques,
+                    )
+                    for s in u.sugerencias
+                ],
+            )
+            for u in diag.unidades
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -303,9 +341,11 @@ async def solve(req: SolveRequest, background_tasks: BackgroundTasks):
         _state["status"]                 = "running"
         _state["progress"]               = "Iniciando…"
         _state["error"]                  = ""
+        _state["estado"]                 = ""
         _state["asignaciones"]           = None
         _state["metricas"]               = None
         _state["reporte"]                = None
+        _state["diagnostico"]            = None
         _state["excel_bytes"]            = None
 
     background_tasks.add_task(_solve_background, req)
@@ -323,24 +363,53 @@ def get_status():
 
 @router.get("/results", response_model=SolveResult)
 def get_results():
-    """Devuelve secciones, métricas y reporte de violaciones. 404 si no está listo."""
+    """
+    Devuelve el resultado del solve. Según `estado`:
+      FACTIBLE   — secciones + métricas + reporte (horario completo).
+      PARCIAL    — secciones + métricas + reporte del subconjunto colocado, más diagnóstico.
+      INFEASIBLE — sin horario; solo diagnóstico.
+    404 si aún no está listo.
+    """
     if _state["status"] != "ready":
         raise HTTPException(
             status_code=404,
             detail=f"Resultados no disponibles (status={_state['status']})",
         )
-    secciones = _build_secciones(_state["datos"], _state["asignaciones"])
-    metricas_raw = _state["metricas"]
-    metricas = MetricasResult(
-        fitness_cpsat=metricas_raw["fitness_cpsat"],
-        fitness_ga=metricas_raw["fitness_ga"],
-        mejora_pct=metricas_raw["mejora_pct"],
-        n_secciones=metricas_raw["n_secciones"],
-        n_bloques_totales=metricas_raw["n_bloques_totales"],
-        estado_cpsat=metricas_raw["estado_cpsat"],
+    secciones = (
+        _build_secciones(_state["datos"], _state["asignaciones"])
+        if _state["asignaciones"] else []
     )
+    metricas_raw = _state["metricas"]
+    metricas = None
+    if metricas_raw:
+        metricas = MetricasResult(
+            fitness_cpsat=metricas_raw["fitness_cpsat"],
+            fitness_ga=metricas_raw["fitness_ga"],
+            mejora_pct=metricas_raw["mejora_pct"],
+            n_secciones=metricas_raw["n_secciones"],
+            n_bloques_totales=metricas_raw["n_bloques_totales"],
+            estado_cpsat=metricas_raw["estado_cpsat"],
+        )
     reporte = _build_reporte(_state["reporte"]) if _state["reporte"] else None
-    return SolveResult(metricas=metricas, secciones=secciones, reporte=reporte)
+    diagnostico = _build_diagnostico(_state["diagnostico"]) if _state["diagnostico"] else None
+    return SolveResult(
+        estado=_state["estado"] or "FACTIBLE",
+        metricas=metricas,
+        secciones=secciones,
+        reporte=reporte,
+        diagnostico=diagnostico,
+    )
+
+
+@router.get("/diagnostico", response_model=DiagnosticoResult)
+def get_diagnostico():
+    """Devuelve el diagnóstico de conflictos del último solve. 404 si no hay."""
+    if _state["status"] != "ready" or _state["diagnostico"] is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay diagnóstico disponible (el horario es factible o aún no se resolvió).",
+        )
+    return _build_diagnostico(_state["diagnostico"])
 
 
 @router.get("/report", response_model=ReporteDetallado)
