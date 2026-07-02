@@ -61,6 +61,13 @@ def _comparten_malla(datos: DatosProblema, s1, s2) -> bool:
     return False
 
 
+def _profs_afectan(s) -> set[str]:
+    """RUTs de profesores que deben estar libres para esta sección (prof 1 y prof 2)."""
+    if not s.afecta_disponibilidad:
+        return set()
+    return {r for r in (s.rut_profesor, getattr(s, "rut_profesor_2", "")) if r}
+
+
 def _tipo_esperado(s, indice: int) -> str | None:
     """Tipo de bloque que debe ocupar el hueco `indice` de la sección (o None si libre)."""
     tipos = s.tipos_bloques_necesarios
@@ -96,13 +103,14 @@ def conflictos_de_seccion(
                 _add("intra", f"Los bloques {_bloque_str(bloques[i])} y "
                               f"{_bloque_str(bloques[j])} de la misma sección se solapan.")
 
-    # RD2 — disponibilidad del profesor
-    prof = datos.profesores.get(s.rut_profesor) if s.rut_profesor else None
-    if s.afecta_disponibilidad and prof and prof.disponibilidad:
-        fuera = [b for b in bloques if b not in prof.disponibilidad]
-        if fuera:
-            _add("RD2", f"El profesor {_prof_nombre(datos, s.rut_profesor)} no está "
-                        f"disponible en {', '.join(_bloque_str(b) for b in fuera)}.")
+    # RD2 — disponibilidad de cada profesor que afecta (prof 1 y prof 2 co-dictante)
+    for rut in _profs_afectan(s):
+        prof = datos.profesores.get(rut)
+        if prof and prof.disponibilidad:
+            fuera = [b for b in bloques if b not in prof.disponibilidad]
+            if fuera:
+                _add("RD2", f"El profesor {_prof_nombre(datos, rut)} no está "
+                            f"disponible en {', '.join(_bloque_str(b) for b in fuera)}.")
 
     # RD6 — la duración del bloque debe calzar con lo que necesita la sección
     tipos_ok = set(s.tipos_bloques_necesarios) if s.tipos_bloques_necesarios else {s.duracion_bloque}
@@ -144,12 +152,12 @@ def conflictos_de_seccion(
         if os_.codigo_curso != s.codigo_curso and _comparten_malla(datos, s, os_):
             _add("RD1", f"Tope de malla con {oid} (mismo semestre en la malla).")
 
-        # RD3 — mismo profesor en dos secciones a la vez
-        if (s.afecta_disponibilidad and os_.afecta_disponibilidad
-                and s.rut_profesor and s.rut_profesor == os_.rut_profesor
-                and os_.codigo_curso != s.codigo_curso):
-            _add("RD3", f"El profesor {_prof_nombre(datos, s.rut_profesor)} ya está en "
-                        f"{oid} a esa hora.")
+        # RD3 — profesor compartido en dos secciones a la vez (incluye prof 2)
+        if os_.codigo_curso != s.codigo_curso:
+            compartidos = _profs_afectan(s) & _profs_afectan(os_)
+            for rut in compartidos:
+                _add("RD3", f"El profesor {_prof_nombre(datos, rut)} ya está en "
+                            f"{oid} a esa hora.")
 
         # RD4 — misma sala especial
         if sala_s and os_.componente != TipoReunion.AYUD:

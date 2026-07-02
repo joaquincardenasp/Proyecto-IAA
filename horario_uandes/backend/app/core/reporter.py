@@ -157,14 +157,18 @@ def _rd3(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
     por_prof: dict[str, list[str]] = defaultdict(list)
     for sec_id in asig:
         s = sec_by_id.get(sec_id)
-        if s and s.afecta_disponibilidad and s.rut_profesor:
-            por_prof[s.rut_profesor].append(sec_id)
+        if not s or not s.afecta_disponibilidad:
+            continue
+        # Incluye al profesor 2 co-dictante de CLAS.
+        for rut in (s.rut_profesor, s.rut_profesor_2):
+            if rut:
+                por_prof[rut].append(sec_id)
 
     violaciones: list[dict] = []
+    vistos: set[frozenset] = set()  # un par puede compartir dos profesores → no duplicar
     for rut, ids in por_prof.items():
         prof = datos.profesores.get(rut)
         nombre = (prof.nombre if prof.nombre else prof.rut) if prof else rut
-        vistos: set[frozenset] = set()
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
                 id1, id2 = ids[i], ids[j]

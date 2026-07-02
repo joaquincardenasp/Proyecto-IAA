@@ -52,6 +52,7 @@ class Seccion:
     componente: TipoReunion
     rut_profesor: str
     afecta_disponibilidad: bool
+    rut_profesor_2: str = ""        # segundo profesor (co-dictante), "" si no hay
     cantidad_bloques_necesarios: int = 1
     tipos_bloques_necesarios: list[str] = field(default_factory=list)  # [] = normal; ["2h","1h"] = 2+1
     duracion_bloque: str = "2h"

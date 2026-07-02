@@ -644,7 +644,7 @@ def _leer_maestro(
         if rut2:
             advertencias.append(
                 f"[INFO] {codigo}-{seccion_id}: PROFESOR 2 presente ({nombre2}) — "
-                "solo se usa PROF 1 para restricciones en v1"
+                "co-dictante de CLAS: se le aplican RD2 (disponibilidad) y RD3 (unicidad)"
             )
 
         # Registrar todos los profesores de esta fila
@@ -707,6 +707,7 @@ def _leer_maestro(
                     componente=TipoReunion.CLAS,
                     rut_profesor=rut1,
                     afecta_disponibilidad=bool(rut1),
+                    rut_profesor_2=rut2,
                     cantidad_bloques_necesarios=_calcular_bloques_clas(clas_h, distribucion),
                     tipos_bloques_necesarios=["2h", "1h"] if es_2mas1 else [],
                     duracion_bloque=_duracion_bloque_clas(clas_h, distribucion),

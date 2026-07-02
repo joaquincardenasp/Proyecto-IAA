@@ -172,10 +172,16 @@ def disponibilidad_seccion(
                 if TODOS_BLOQUES[b].tipo == dur
                 and (not es_ayud or b not in _BLOQUES_PROHIBIDOS_AYUD)}
                 
-    prof = datos.profesores.get(s.rut_profesor) if s.rut_profesor else None
-    tiene = usar_rd2 and s.afecta_disponibilidad and prof is not None and bool(prof.disponibilidad)
-    if tiene:
-        return {b for b in base if b in prof.disponibilidad}
+    # RD2: la sección debe caber en la disponibilidad de TODOS sus profesores que afectan
+    # (profesor 1 y, si existe, profesor 2 co-dictante). JORNADA = disponibilidad vacía =
+    # sin restricción. Se intersecta con cada profesor con disponibilidad declarada.
+    if usar_rd2 and s.afecta_disponibilidad:
+        for rut in (s.rut_profesor, getattr(s, "rut_profesor_2", "")):
+            if not rut:
+                continue
+            prof = datos.profesores.get(rut)
+            if prof and prof.disponibilidad:
+                base = {b for b in base if b in prof.disponibilidad}
     return base
 
 
@@ -322,16 +328,26 @@ def resolver(
                     vistos_rd1.add(par)
                     n_rd1 += _nover(grp[i].id, grp[j].id)
 
-    # RD3: un profesor no dicta dos secciones a la vez
+    # RD3: un profesor no dicta dos secciones a la vez (incluye al profesor 2 co-dictante).
     n_rd3 = 0
     if usar_rd3:
         por_prof: dict[str, list] = defaultdict(list)
         for s in secciones:
-            if s.afecta_disponibilidad and s.rut_profesor:
-                por_prof[s.rut_profesor].append(s)
+            if not s.afecta_disponibilidad:
+                continue
+            for rut in (s.rut_profesor, s.rut_profesor_2):
+                if rut:
+                    por_prof[rut].append(s)
+        vistos_rd3: set[frozenset] = set()  # un mismo par puede compartir dos profesores
         for grp in por_prof.values():
             for i in range(len(grp)):
                 for j in range(i + 1, len(grp)):
+                    if grp[i].id == grp[j].id:
+                        continue
+                    par = frozenset((grp[i].id, grp[j].id))
+                    if par in vistos_rd3:
+                        continue
+                    vistos_rd3.add(par)
                     n_rd3 += _nover(grp[i].id, grp[j].id)
 
     # RD4: capacidad de salas especiales

@@ -202,8 +202,12 @@ def construir_contexto(
     for i, sec_ids in enumerate(rep_seccion_ids):
         for sec_id in sec_ids:
             s = sec_by_id[sec_id]
-            if s.afecta_disponibilidad and s.rut_profesor:
-                por_prof_set[s.rut_profesor].add(i)
+            if not s.afecta_disponibilidad:
+                continue
+            # Incluye al profesor 2 co-dictante: ambos deben quedar sin solape.
+            for rut in (s.rut_profesor, s.rut_profesor_2):
+                if rut:
+                    por_prof_set[rut].add(i)
     for prof_idxs in por_prof_set.values():
         idxs = sorted(prof_idxs)
         for a in range(len(idxs)):
