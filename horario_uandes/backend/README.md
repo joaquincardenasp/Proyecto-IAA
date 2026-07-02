@@ -7,9 +7,17 @@ CP-SAT, qué restricciones blandas evalúa el GA, y las limitaciones conocidas.
 Pipeline general:
 
 ```
-parser.py  →  solver_cpsat.py  →  solver_ga.py  →  exporter.py / reporter.py
-(datos)       (factibilidad)      (optimización)    (Excel / reporte)
+parser.py → solver_cpsat.py → solver_ga.py → exporter.py / reporter.py
+(datos)     (factibilidad)     (optimización)  (Excel / reporte)
+                  │
+                  └─ si no hay horario completo:
+                     resolver_por_partes → horario PARCIAL + diagnostico.py (causas + acciones)
 ```
+
+> **Paradigma (asistente, no generador perfecto).** El sistema **nunca relaja restricciones
+> duras automáticamente**. O entrega un horario factible, o entrega el mejor subconjunto
+> factible (PARCIAL) junto con un **diagnóstico accionable** de lo que no cupo, y deja que el
+> usuario resuelva (editando o ajustando datos) y revalide. Ver §5.
 
 ---
 
@@ -38,7 +46,7 @@ Solo se procesan las filas con **`CURSO MANDANTE` = "SI"**. Por cada fila:
 | Plan de estudio | `PLAN DE ESTUDIO` | usado para acumular semestres |
 | Semestre malla | `Plan Común`, o `ICI/IOC/ICE/ICC/ICA` | si `Plan Común` tiene valor se usa **solo** esa; si no, las de carrera. Se preservan sufijos de mención ("9a") |
 | Horas a programar | `Clases A PROGRAMAR`, `Ayudantías PROGRAMAR`, `Laboratorios o Talleres PROGRAMAR` | enteros (se usan estas, **no** las regulares) |
-| Distribución | `2+1 o 3?` | `"3"/"3-juntas"` → 1 bloque; resto → `ceil(horas/2)` |
+| Distribución | `2+1 o 3?` | `"3"/"3-juntas"` → 1 bloque de 3h; `"2+1"` → 1 bloque de 2h + 1 de 1h; resto → `ceil(horas/2)` bloques de 2h |
 | Profesor cátedra | `RUT PROFESOR 1` | normalizado (sin puntos/espacios) |
 | Profesor lab | `RUT PROFESOR LABT` | si existe |
 
@@ -59,10 +67,12 @@ semestre— sí se registra.
 "3"/"3-juntas". Un mismo curso en varias filas (distintos planes) **acumula semestres**
 (unión de sets); las secciones se crean una sola vez por `(codigo, seccion, componente)`.
 
-**Duración de bloque por sección** (`duracion_bloque`): `"3h"` solo si la distribución es
-`"3"/"3-juntas"` y el componente tiene ≥3 horas (o un AYUD/LABT de 3 horas seguidas); en todo
-otro caso `"2h"` (incluido `"2+1"`, que en v1 se trata como 2h). El solver solo asigna a la
-sección bloques de **su** duración (ver RD6).
+**Duración de bloque por sección** (`duracion_bloque` / `tipos_bloques_necesarios`): `"3h"`
+solo si la distribución es `"3"/"3-juntas"` y el componente tiene ≥3 horas; el resto es `"2h"`.
+La distribución **`"2+1"`** está implementada: la sección lleva
+`tipos_bloques_necesarios=["2h","1h"]` y el resolver filtra el dominio por tipo para cada
+variable (una va a bloques de 2h, la otra a bloques de 1h; no se solapan). El solver solo
+asigna a cada variable de la sección bloques de **su** tipo (ver RD6).
 
 ### 1.3 Tipo de profesor y disponibilidad
 
@@ -105,22 +115,25 @@ Curso(codigo, titulo, semestres_por_carrera {carrera: {sem}}, planes,
       clases_horas, ayudantias_horas, laboratorios_horas, sala_especial)
 
 Seccion(id="{codigo}-{seccion}-{componente}", codigo_curso, seccion, componente,
-        rut_profesor, afecta_disponibilidad, cantidad_bloques_necesarios)
+        rut_profesor, afecta_disponibilidad, cantidad_bloques_necesarios,
+        tipos_bloques_necesarios=[], duracion_bloque="2h")
 
 Profesor(rut, nombre, tipo {JORNADA|HONORARIO}, disponibilidad: set[bloque_idx])
 ```
 
 ### 1.6 Catálogo de bloques (`blocks.py`)
 
-95 bloques = **19 tipos × 5 días**. Cada bloque tiene `sub_bloques` (slots de 50 min).
+145 bloques = **29 tipos × 5 días**. Cada bloque tiene `sub_bloques` (slots de 50 min).
 Dos bloques **se solapan** si son del mismo día y comparten ≥1 sub-bloque
 (`MATRIZ_SOLAPAMIENTO`), **no** por igualdad de índice.
 
-- **7 tipos estándar** (`es_estandar=True`): 5 de 2h (8:30, 10:30, 13:30, 15:30, 17:30)
-  + 2 de 3h (10:30-13:20, 12:30-15:20). Es la grilla institucional preferida.
-- **12 tipos "helper"** (`es_estandar=False`): rellenan los huecos (inicios 9:30, 11:30,
-  12:30, 14:30, 16:30 y 3h de mañana/tarde/noche) para que cualquier disponibilidad sea
-  representable. Se usan **solo como último recurso** (ver objetivo del solver).
+- **Tipos estándar** (`es_estandar=True`): 5 de 2h (8:30, 10:30, 13:30, 15:30, 17:30),
+  2 de 3h (10:30-13:20, 12:30-15:20) y 10 de 1h (8:30-9:20 … 17:30-18:20). Es la grilla
+  institucional preferida.
+- **Tipos "helper"** (`es_estandar=False`): 5 de 2h + 7 de 3h que rellenan los huecos
+  (inicios 9:30, 11:30, 12:30, 14:30, 16:30 y 3h de mañana/tarde/noche) para que cualquier
+  disponibilidad sea representable. Se usan **solo como último recurso** (ver objetivo del
+  solver). Los bloques de 1h se usan solo para el segundo componente de las secciones "2+1".
 
 ---
 
@@ -148,8 +161,9 @@ estándar; las que sí tienen disponibilidad pueden usar helpers, pero solo cuan
 disponibilidad lo obliga.
 
 **Verificación independiente** (`verificar_topes`, `verificar_rd3`, `verificar_rd4`,
-`verificar_intra`): re-chequean la solución. En la corrida completa (293 secciones
-programables, 7 carreras) el resultado es `topes=0, RD3=0, RD4=0, intra=0`.
+`verificar_intra`): re-chequean la solución. Sobre el horario entregado —completo o
+parcial— el resultado es `topes=0, RD3=0, RD4=0, intra=0`: el sistema nunca entrega un
+horario que viole una restricción dura (lo que no cabe se reporta como diagnóstico, §5).
 
 ### Resumen de las preguntas concretas
 
@@ -192,10 +206,7 @@ Parámetros por defecto de `ejecutar_ga`: `n_generaciones=200`, `pop_size=40`, `
 
 ## 4. Limitaciones conocidas (lo que NO se verifica)
 
-1. **Distribución "2+1"**: se trata como 2h (`ceil(horas/2)`). No se modela el bloque
-   adicional de 1h.
-
-2. **Días distintos para secciones multi-bloque: no es restricción dura.** El intra-sección
+1. **Días distintos para secciones multi-bloque: no es restricción dura.** El intra-sección
    solo prohíbe **solapamiento**. Dos bloques de la misma sección en el mismo día pero sin
    solaparse (ej. 8:30 y 10:30) están permitidos por CP-SAT; el GA lo **desalienta** vía
    RB4 (blanda), pero no lo prohíbe.
@@ -228,3 +239,67 @@ Parámetros por defecto de `ejecutar_ga`: `n_generaciones=200`, `pop_size=40`, `
 
 10. **Selección del Maestro**: si hay varios `Maestro*.xlsx` en `inputs/`, se usa el primero
     alfabéticamente (con aviso). No se valida que sea el "correcto".
+
+---
+
+## 5. Asistente: horario parcial, diagnóstico y edición
+
+El sistema **no relaja restricciones duras**. Cuando el modelo completo no es factible,
+en vez de fallar (o inventar un horario relajado) entrega lo que sí cabe y explica el resto.
+
+### 5.1 Resolución por partes (`solver_cpsat.resolver_por_partes`)
+
+1. Intenta el modelo **completo**. Si es factible → `estado="FACTIBLE"` (horario total).
+2. Si es INFEASIBLE, descompone en unidades **`(carrera, semestre)`** —la granularidad más
+   fina que preserva RD1— y las resuelve **incrementalmente**: cada unidad respeta como
+   **fijas** las secciones ya colocadas (RD1/RD3/RD4 contra ellas, vía los parámetros
+   `secciones`/`fijadas` de `resolver`). Las que no entran se marcan **bloqueadas**.
+   Resultado: `estado="PARCIAL"` con `asignaciones` (subconjunto que respeta TODAS las duras)
+   + `bloqueadas: [UnidadBloqueada(carrera, semestre, secciones)]`. Si no entra nada →
+   `"INFEASIBLE"`.
+
+### 5.2 Diagnóstico (`diagnostico.py`)
+
+Toma las unidades bloqueadas y produce, por unidad, la causa + **acciones concretas**:
+
+- **Capa 1 — imposibilidad aislada** (sin solver): secciones imposibles por sí solas
+  (sin bloques válidos; `2+1` cuyos únicos 2h y 1h se solapan; sesiones que no caben en
+  horarios no solapados). Son los diagnósticos más precisos.
+- **Capa 2 — restricción culpable** (con solver, en aislamiento): re-resuelve la unidad
+  **sola**. Si es factible aislada → el bloqueo es **contención** con otros semestres
+  (profesor/sala compartidos, que se identifican). Si es infactible aislada → prueba
+  desactivar RD2/RD3/RD4 **solo para diagnosticar** (nunca se devuelve ese horario) y
+  señala la restricción culpable.
+
+Salida: `Diagnostico(unidades=[DiagnosticoUnidad(carrera, semestre, causa_principal,
+sugerencias=[Sugerencia(causa, severidad, mensaje, acciones, secciones, profesores,
+bloques)])])`.
+
+### 5.3 Edición manual con revalidación (`edicion.py`)
+
+Edición interactiva "click-para-mover": el usuario mueve un bloque de una sección y el
+sistema valida contra **todas** las duras (chequeo focalizado en la sección movida, porque
+el resto no cambia). No bloquea el movimiento: informa los conflictos y el usuario decide.
+
+- `conflictos_de_seccion(datos, asig, sec_id)` → conflictos duros (RD1/RD2/RD3/RD4/RD6/RD7/
+  intra/NRC) que involucran a `sec_id`.
+- `bloques_validos(datos, asig, sec_id, indice)` → por cada bloque candidato del hueco,
+  `estado="valido"` (verde) o `"conflicto"` (rojo, con `motivos`).
+- `aplicar_movimiento(...)` → nueva asignación + conflictos resultantes.
+
+### 5.4 Endpoints (`api/routes.py`)
+
+| Método | Ruta | Qué hace |
+|--------|------|----------|
+| POST | `/upload` | Sube los Excel a `inputs/`. |
+| POST | `/solve` | Lanza el pipeline en background. |
+| GET | `/status` | Progreso (`idle/running/ready/error`). |
+| GET | `/results` | Resultado: `estado`, `secciones`, `metricas`, `reporte`, `diagnostico`. |
+| GET | `/diagnostico` | Solo el diagnóstico del último solve. |
+| GET | `/report` | Solo el reporte de violaciones. |
+| POST | `/editar/bloques-validos` | Candidatos verde/rojo para mover un bloque. |
+| POST | `/editar/mover` | Aplica el movimiento, revalida y regenera reporte + Excel. |
+| GET | `/export` | Descarga el `.xlsx` generado. |
+
+> **Nota:** la re-subida del Excel editado (revalidación por archivo) está **diferida**;
+> la edición se hace hoy con el flujo interactivo de §5.3.

@@ -312,7 +312,13 @@ export default function App() {
           <SolverPanel status={status} onSolveStarted={startPolling} />
         )}
         {tab === "horario" && tieneHorario && (
-          <HorarioGrid secciones={results!.secciones} />
+          <HorarioGrid
+            secciones={results!.secciones}
+            onEdited={async () => {
+              const r = await getResults();
+              setResults(r);
+            }}
+          />
         )}
         {tab === "metricas" && results?.metricas && (
           <MetricasPanel

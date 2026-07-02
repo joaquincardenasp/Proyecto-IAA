@@ -25,6 +25,7 @@ from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
 from ..core.parser import cargar_datos
 from ..core.diagnostico import diagnosticar
+from ..core.edicion import aplicar_movimiento, bloques_validos
 from ..core.reporter import generar_reporte_detallado
 from ..core.solver_cpsat import resolver_por_partes
 from ..core.solver_ga import (
@@ -36,9 +37,15 @@ from ..core.solver_ga import (
 )
 from ..schemas.solve import (
     BloqueAsignado,
+    BloquesValidosRequest,
+    BloquesValidosResponse,
+    BloqueValido,
+    ConflictoItem,
     DiagnosticoResult,
     DiagnosticoUnidadItem,
     MetricasResult,
+    MoverRequest,
+    MoverResponse,
     ReporteDetallado,
     ResumenReporte,
     SeccionAsignada,
@@ -151,7 +158,9 @@ def _solve_sync(req: SolveRequest) -> None:
                 "mejora_pct":             mejora_pct,
                 "n_secciones":            len(asignaciones),
                 "n_bloques_totales":      n_bloques_totales,
-                "estado_cpsat":           resultado.estado,
+                # Factibilidad del horario COLOCADO (siempre respeta las duras). El estado
+                # global FACTIBLE/PARCIAL/INFEASIBLE va en SolveResult.estado, no aquí.
+                "estado_cpsat":           "FEASIBLE",
             }
 
             _set_progress("Generando Excel…")
@@ -421,6 +430,66 @@ def get_report():
             detail=f"Reporte no disponible (status={_state['status']})",
         )
     return _build_reporte(_state["reporte"])
+
+
+@router.post("/editar/bloques-validos", response_model=BloquesValidosResponse)
+def editar_bloques_validos(req: BloquesValidosRequest):
+    """
+    Para una sección del horario actual, devuelve los bloques candidatos del hueco `indice`
+    marcados como 'valido' (verde) o 'conflicto' (rojo, con motivos). No modifica el estado.
+    """
+    if _state["status"] != "ready" or not _state["asignaciones"]:
+        raise HTTPException(status_code=404, detail="No hay un horario cargado para editar.")
+    if req.sec_id not in _state["asignaciones"]:
+        raise HTTPException(status_code=404, detail=f"Sección {req.sec_id} no está en el horario.")
+
+    candidatos = bloques_validos(
+        _state["datos"], _state["asignaciones"], req.sec_id, req.indice
+    )
+    return BloquesValidosResponse(
+        sec_id=req.sec_id,
+        indice=req.indice,
+        candidatos=[BloqueValido(**c) for c in candidatos],
+    )
+
+
+@router.post("/editar/mover", response_model=MoverResponse)
+def editar_mover(req: MoverRequest):
+    """
+    Mueve el hueco `indice` de una sección al bloque `destino` y revalida. Aplica el cambio
+    (el sistema informa los conflictos resultantes, no bloquea) y regenera reporte y Excel.
+    """
+    if _state["status"] != "ready" or not _state["asignaciones"]:
+        raise HTTPException(status_code=404, detail="No hay un horario cargado para editar.")
+    if req.sec_id not in _state["asignaciones"]:
+        raise HTTPException(status_code=404, detail=f"Sección {req.sec_id} no está en el horario.")
+
+    datos = _state["datos"]
+    try:
+        nueva, conflictos = aplicar_movimiento(
+            datos, _state["asignaciones"], req.sec_id, req.indice, req.destino
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Persistir el cambio y regenerar reporte + Excel para mantener todo consistente.
+    _state["asignaciones"] = nueva
+    _state["reporte"] = generar_reporte_detallado(datos, nueva)
+    try:
+        _state["excel_bytes"] = exportar_horario(
+            datos, nueva,
+            output_path=OUTPUTS_DIR / "horario_generado.xlsx",
+            reporte=_state["reporte"],
+        )
+    except PermissionError:
+        _state["excel_bytes"] = exportar_horario(datos, nueva, reporte=_state["reporte"])
+
+    seccion = _build_secciones(datos, {req.sec_id: nueva[req.sec_id]})[0]
+    return MoverResponse(
+        sec_id=req.sec_id,
+        seccion=seccion,
+        conflictos=[ConflictoItem(**c) for c in conflictos],
+    )
 
 
 @router.get("/export")

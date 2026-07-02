@@ -41,11 +41,12 @@ def check(cond: bool, msg: str) -> None:
 def test_blocks() -> None:
     print("\n--- test_blocks ---")
 
-    # Catálogo ampliado: 7 bloques estándar + 12 helper = 19 tipos × 5 días = 95
-    check(N_BLOQUES == 95, f"95 bloques totales (hay {N_BLOQUES})")
+    # Catálogo: 29 tipos (2h/3h estándar + helper + 1h para 2+1) × 5 días = 145
+    check(N_BLOQUES == 145, f"145 bloques totales (hay {N_BLOQUES})")
 
+    # Estándar: 5 (2h) + 2 (3h) + 10 (1h) = 17 tipos × 5 días = 85
     estandar = [b for b in TODOS_BLOQUES if b.es_estandar]
-    check(len(estandar) == 35, f"35 bloques estándar (7 tipos × 5 días) (hay {len(estandar)})")
+    check(len(estandar) == 85, f"85 bloques estándar (17 tipos × 5 días) (hay {len(estandar)})")
 
     # Los bloques 3h ESTÁNDAR inician en 10:30 o 12:30; los helper rellenan otros inicios
     b3h_std = [b for b in TODOS_BLOQUES if b.tipo == "3h" and b.es_estandar]
@@ -290,7 +291,10 @@ def test_horas_a_bloques(datos) -> None:
         curso = cursos.get(s.codigo_curso)
         if not curso:
             continue
-        if s.componente == TipoReunion.CLAS and curso.clases_horas == 2:
+        # Las secciones 2+1 (tipos_bloques_necesarios=["2h","1h"]) llevan 2 bloques
+        # legítimamente (uno de 2h + uno de 1h), aunque el curso tenga clases_horas == 2.
+        if (s.componente == TipoReunion.CLAS and curso.clases_horas == 2
+                and not s.tipos_bloques_necesarios):
             check(
                 s.cantidad_bloques_necesarios == 1,
                 f"{s.codigo_curso} (2h CLAS) → 1 bloque (es {s.cantidad_bloques_necesarios})",

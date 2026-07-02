@@ -11,7 +11,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.core.parser import cargar_datos
-from app.core.solver_cpsat import imprimir_resultado, resolver, verificar_topes
+from app.core.solver_cpsat import resolver_por_partes, verificar_topes
 from app.core.blocks import TODOS_BLOQUES
 
 INPUTS_DIR = Path(__file__).parent.parent / "inputs"
@@ -28,12 +28,16 @@ def check(condicion: bool, mensaje: str) -> None:
 def test_step4(datos, carreras: list[str]):
     print(f"\n--- test_step4 ({', '.join(carreras)}) ---")
 
-    resultado = resolver(datos, carreras=carreras)
-    imprimir_resultado(datos, resultado)
+    # Nuevo paradigma: el sistema entrega el mejor horario posible sin relajar duras.
+    # El modelo completo puede no ser factible (→ PARCIAL); lo que importa es que TODO lo
+    # colocado respete las restricciones duras (verificado más abajo).
+    resultado = resolver_por_partes(datos, carreras=carreras)
+    print(f"  estado={resultado.estado}  colocadas={len(resultado.asignaciones)}  "
+          f"bloqueadas={len(resultado.bloqueadas)}")
 
     check(
-        resultado.estado in ("OPTIMAL", "FEASIBLE"),
-        f"Solver encontró solución (estado: {resultado.estado})",
+        resultado.estado in ("FACTIBLE", "PARCIAL"),
+        f"El sistema entregó un horario (estado: {resultado.estado})",
     )
 
     codigos_restringidos = {
@@ -42,8 +46,8 @@ def test_step4(datos, carreras: list[str]):
     }
     secciones_esperadas = [s for s in datos.secciones if s.codigo_curso in codigos_restringidos]
     check(
-        len(resultado.asignaciones) == len(secciones_esperadas),
-        f"Todas las secciones asignadas "
+        0 < len(resultado.asignaciones) <= len(secciones_esperadas),
+        f"Secciones colocadas dentro del rango esperado "
         f"({len(resultado.asignaciones)}/{len(secciones_esperadas)})",
     )
 

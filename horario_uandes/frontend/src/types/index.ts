@@ -102,6 +102,36 @@ export interface StatusResponse {
   error: string
 }
 
+// ── Edición manual (click-para-mover) ──────────────────────────────────────────
+
+export interface BloqueValido {
+  bloque: number
+  dia: Dia
+  hora_inicio: string
+  hora_fin: string
+  es_helper: boolean
+  actual: boolean
+  estado: 'valido' | 'conflicto'
+  motivos: string[]
+}
+
+export interface BloquesValidosResponse {
+  sec_id: string
+  indice: number
+  candidatos: BloqueValido[]
+}
+
+export interface ConflictoItem {
+  tipo: string
+  motivo: string
+}
+
+export interface MoverResponse {
+  sec_id: string
+  seccion: SeccionAsignada
+  conflictos: ConflictoItem[]
+}
+
 export interface SolveParams {
   carreras: string[]
   n_generaciones: number

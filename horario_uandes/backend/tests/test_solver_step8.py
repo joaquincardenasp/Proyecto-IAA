@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import openpyxl
 
 from app.core.parser import cargar_datos
-from app.core.solver_cpsat import resolver
+from app.core.solver_cpsat import resolver_por_partes
 from app.core.solver_ga import ejecutar_ga, calcular_fitness, encode, construir_contexto, PESOS
 from app.core.exporter import exportar_horario, _CARRERAS
 from app.core.blocks import TODOS_BLOQUES
@@ -45,9 +45,9 @@ def test_step8(datos):
 
     # 1. Resolver (CP-SAT + GA rápido)
     print("\n  Ejecutando CP-SAT…")
-    resultado_cpsat = resolver(datos, carreras=CARRERAS)
-    check(resultado_cpsat.estado in ("OPTIMAL", "FEASIBLE"),
-          f"CP-SAT encontró solución ({resultado_cpsat.estado})")
+    resultado_cpsat = resolver_por_partes(datos, carreras=CARRERAS)
+    check(resultado_cpsat.estado in ("FACTIBLE", "PARCIAL"),
+          f"El sistema entregó un horario ({resultado_cpsat.estado})")
 
     print("  Ejecutando GA (50 generaciones para test rápido)…")
     resultado_ga = ejecutar_ga(

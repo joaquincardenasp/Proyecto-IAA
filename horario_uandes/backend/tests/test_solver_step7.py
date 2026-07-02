@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.core.parser import cargar_datos
 from app.core.solver_cpsat import (
-    resolver,
+    resolver_por_partes,
     verificar_topes, verificar_intra,
     verificar_rd3, verificar_rd4, verificar_rd7,
 )
@@ -131,12 +131,13 @@ def test_step7(datos):
 
     # 1. Resolver con CP-SAT
     print("\n  Ejecutando CP-SAT...")
-    resultado_cpsat = resolver(datos, carreras=CARRERAS)
+    resultado_cpsat = resolver_por_partes(datos, carreras=CARRERAS)
     check(
-        resultado_cpsat.estado in ("OPTIMAL", "FEASIBLE"),
-        f"CP-SAT encontró solución (estado: {resultado_cpsat.estado})",
+        resultado_cpsat.estado in ("FACTIBLE", "PARCIAL"),
+        f"El sistema entregó un horario (estado: {resultado_cpsat.estado})",
     )
-    print(f"  CP-SAT: {len(resultado_cpsat.asignaciones)} secciones asignadas")
+    print(f"  CP-SAT: {len(resultado_cpsat.asignaciones)} secciones colocadas "
+          f"({len(resultado_cpsat.bloqueadas)} unidades bloqueadas)")
 
     # 2. Verificar restricciones duras del CP-SAT
     print("\n  Verificando restricciones duras CP-SAT...")

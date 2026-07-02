@@ -120,6 +120,15 @@ def test_step9():
     check(len(secciones) == metricas["n_secciones"],
           f"len(secciones)==n_secciones ({len(secciones)})")
 
+    # Nuevo contrato del asistente: estado global + diagnóstico si es parcial
+    estado = data.get("estado")
+    check(estado in ("FACTIBLE", "PARCIAL", "INFEASIBLE"),
+          f"results tiene estado válido ({estado})")
+    if estado == "PARCIAL":
+        diag = data.get("diagnostico")
+        check(diag is not None and len(diag.get("unidades", [])) > 0,
+              "un resultado PARCIAL incluye diagnóstico con unidades bloqueadas")
+
     # Validar estructura de una sección
     s0 = secciones[0]
     for campo in ("id", "codigo", "titulo", "seccion", "tipo", "profesor", "bloques"):

@@ -1,6 +1,9 @@
 import { useState, useMemo } from 'react'
-import { Search, X } from 'lucide-react'
-import type { SeccionAsignada, TipoSeccion, Dia } from '../types'
+import { Search, X, Move, Check, AlertTriangle, Loader2 } from 'lucide-react'
+import type {
+  SeccionAsignada, TipoSeccion, Dia, BloqueValido, ConflictoItem,
+} from '../types'
+import { getBloquesValidos, postMover } from '../api/client'
 
 // ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -203,13 +206,22 @@ function buildPlacements(filtered: SeccionAsignada[]): Record<Dia, Placement[]> 
 
 // ── Componente principal ──────────────────────────────────────────────────────
 
-interface Props { secciones: SeccionAsignada[] }
+interface Props {
+  secciones: SeccionAsignada[]
+  /** Se llama tras un movimiento aplicado, para que el padre refresque el resultado. */
+  onEdited?: () => void | Promise<void>
+}
 
-export default function HorarioGrid({ secciones }: Props) {
+export default function HorarioGrid({ secciones, onEdited }: Props) {
   const [filters, setFilters]   = useState<Filters>({
     carrera: '', semestre: '', tipo: '', texto: '',
   })
   const [selected, setSelected] = useState<SeccionAsignada | null>(null)
+
+  async function handleMoved(sec: SeccionAsignada) {
+    setSelected(sec)               // reflejar la nueva ubicación en el detalle
+    if (onEdited) await onEdited()  // refrescar horario/reporte en el padre
+  }
 
   const availableSems = useMemo(() => {
     if (!filters.carrera) return []
@@ -387,7 +399,12 @@ export default function HorarioGrid({ secciones }: Props) {
 
       {/* ── Detalle ────────────────────────────────────────────────────────── */}
       {selected && (
-        <SeccionDetail sec={selected} onClose={() => setSelected(null)} />
+        <SeccionDetail
+          key={selected.id}
+          sec={selected}
+          onClose={() => setSelected(null)}
+          onMoved={handleMoved}
+        />
       )}
 
       {/* ── Leyenda ────────────────────────────────────────────────────────── */}
@@ -501,11 +518,52 @@ function SeccionCard({
 // ── SeccionDetail ─────────────────────────────────────────────────────────────
 
 function SeccionDetail({
-  sec, onClose,
+  sec, onClose, onMoved,
 }: {
   sec:     SeccionAsignada
   onClose: () => void
+  onMoved: (sec: SeccionAsignada) => void | Promise<void>
 }) {
+  // Índice del bloque en modo "mover" (o null si no se está editando)
+  const [moveIdx, setMoveIdx]       = useState<number | null>(null)
+  const [candidatos, setCandidatos] = useState<BloqueValido[] | null>(null)
+  const [cargando, setCargando]     = useState(false)
+  const [aplicando, setAplicando]   = useState<number | null>(null)
+  const [resultado, setResultado]   = useState<ConflictoItem[] | 'ok' | null>(null)
+  const [error, setError]           = useState('')
+
+  async function abrirMover(idx: number) {
+    setMoveIdx(idx); setCandidatos(null); setResultado(null); setError('')
+    setCargando(true)
+    try {
+      const r = await getBloquesValidos(sec.id, idx)
+      setCandidatos(r.candidatos)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al cargar candidatos')
+    } finally {
+      setCargando(false)
+    }
+  }
+
+  function cerrarMover() {
+    setMoveIdx(null); setCandidatos(null); setResultado(null); setError('')
+  }
+
+  async function confirmar(destino: number) {
+    if (moveIdx === null) return
+    setAplicando(destino); setError('')
+    try {
+      const r = await postMover(sec.id, moveIdx, destino)
+      setResultado(r.conflictos.length ? r.conflictos : 'ok')
+      setMoveIdx(null); setCandidatos(null)
+      await onMoved(r.seccion)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al mover')
+    } finally {
+      setAplicando(null)
+    }
+  }
+
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-5">
       <div className="flex items-start justify-between mb-4">
@@ -536,16 +594,157 @@ function SeccionDetail({
         />
       </div>
 
+      {/* Resultado del último movimiento */}
+      {resultado === 'ok' && (
+        <div className="mb-3 flex items-center gap-2 text-xs text-green-700 bg-green-50
+                        border border-green-200 rounded px-3 py-2">
+          <Check size={13} /> Bloque movido sin conflictos.
+        </div>
+      )}
+      {Array.isArray(resultado) && (
+        <div className="mb-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+          <div className="flex items-center gap-2 font-medium mb-1">
+            <AlertTriangle size={13} /> Bloque movido, pero quedaron conflictos:
+          </div>
+          <ul className="space-y-0.5 ml-5 list-disc">
+            {resultado.map((c, i) => (
+              <li key={i}><span className="font-semibold">{c.tipo}:</span> {c.motivo}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {error && (
+        <div className="mb-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {/* Bloques asignados, cada uno con acción "Mover" */}
       <div>
         <p className="text-xs font-medium text-gray-400 mb-2">Bloques asignados</p>
         <div className="flex flex-wrap gap-2">
           {sec.bloques.map((b, i) => (
-            <span key={i} className="text-xs bg-gray-100 text-gray-700 px-3 py-1 rounded">
-              {DIAS_LABEL[b.dia as Dia]} · {b.hora_inicio}–{b.hora_fin} ({b.tipo_bloque})
-            </span>
+            <div
+              key={i}
+              className={`flex items-center gap-2 text-xs rounded pl-3 pr-1 py-1
+                ${moveIdx === i ? 'bg-blue-50 border border-blue-300' : 'bg-gray-100'}`}
+            >
+              <span className="text-gray-700">
+                {DIAS_LABEL[b.dia as Dia]} · {b.hora_inicio}–{b.hora_fin} ({b.tipo_bloque})
+              </span>
+              <button
+                onClick={() => (moveIdx === i ? cerrarMover() : abrirMover(i))}
+                className="flex items-center gap-1 text-[11px] font-medium text-blue-700
+                           hover:bg-blue-100 px-1.5 py-0.5 rounded transition-colors"
+              >
+                <Move size={11} /> {moveIdx === i ? 'Cancelar' : 'Mover'}
+              </button>
+            </div>
           ))}
         </div>
       </div>
+
+      {/* Selector de destino (candidatos verde/rojo) */}
+      {moveIdx !== null && (
+        <MoverSelector
+          cargando={cargando}
+          candidatos={candidatos}
+          aplicando={aplicando}
+          onPick={confirmar}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Selector de bloque destino ──────────────────────────────────────────────────
+
+function MoverSelector({
+  cargando, candidatos, aplicando, onPick,
+}: {
+  cargando:   boolean
+  candidatos: BloqueValido[] | null
+  aplicando:  number | null
+  onPick:     (destino: number) => void
+}) {
+  if (cargando) {
+    return (
+      <div className="mt-4 flex items-center gap-2 text-xs text-gray-500">
+        <Loader2 size={13} className="animate-spin" /> Calculando bloques disponibles…
+      </div>
+    )
+  }
+  if (!candidatos) return null
+
+  const porDia: Record<Dia, BloqueValido[]> = { L: [], M: [], X: [], J: [], V: [] }
+  for (const c of candidatos) porDia[c.dia].push(c)
+  for (const d of Object.keys(porDia) as Dia[])
+    porDia[d].sort((a, b) => toMin(a.hora_inicio) - toMin(b.hora_inicio))
+
+  const nValidos = candidatos.filter(c => c.estado === 'valido').length
+
+  return (
+    <div className="mt-4 border-t border-gray-100 pt-4">
+      <div className="flex items-center gap-3 mb-3">
+        <p className="text-xs font-medium text-gray-500">
+          Elige el bloque de destino
+        </p>
+        <span className="flex items-center gap-1 text-[11px] text-green-700">
+          <span className="w-2.5 h-2.5 rounded-sm bg-green-100 border border-green-500" /> sin conflicto ({nValidos})
+        </span>
+        <span className="flex items-center gap-1 text-[11px] text-red-600">
+          <span className="w-2.5 h-2.5 rounded-sm bg-red-50 border border-red-400" /> genera conflicto
+        </span>
+      </div>
+
+      <div className="grid grid-cols-5 gap-2">
+        {DIAS.map(d => (
+          <div key={d.key}>
+            <p className="text-[11px] font-semibold text-gray-500 mb-1.5 text-center">
+              {d.label}
+            </p>
+            <div className="flex flex-col gap-1">
+              {porDia[d.key].length === 0 && (
+                <span className="text-[10px] text-gray-300 text-center">—</span>
+              )}
+              {porDia[d.key].map(c => {
+                const valido = c.estado === 'valido'
+                const busy = aplicando === c.bloque
+                return (
+                  <button
+                    key={c.bloque}
+                    disabled={c.actual || aplicando !== null}
+                    onClick={() => onPick(c.bloque)}
+                    title={c.motivos.join(' · ')}
+                    className={`text-[11px] rounded px-1.5 py-1 border text-left transition-colors
+                      disabled:opacity-100
+                      ${c.actual
+                        ? 'bg-gray-800 text-white border-gray-800 cursor-default'
+                        : valido
+                          ? 'bg-green-50 border-green-400 text-green-800 hover:bg-green-100'
+                          : 'bg-red-50 border-red-300 text-red-700 hover:bg-red-100'
+                      }`}
+                  >
+                    <span className="flex items-center justify-between gap-1 tabular-nums">
+                      {c.hora_inicio}
+                      {busy
+                        ? <Loader2 size={10} className="animate-spin" />
+                        : c.actual
+                          ? <span className="text-[9px]">actual</span>
+                          : c.es_helper
+                            ? <span className="text-[9px] opacity-60">h</span>
+                            : null}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[10px] text-gray-400 mt-2">
+        Pasa el cursor sobre un bloque en rojo para ver el motivo del conflicto. «h» = bloque helper (fuera de la grilla estándar).
+      </p>
     </div>
   )
 }

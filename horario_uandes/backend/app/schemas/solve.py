@@ -114,3 +114,46 @@ class SolveResult(BaseModel):
     secciones: list[SeccionAsignada] = Field(default_factory=list)
     reporte: Optional[ReporteDetallado] = None
     diagnostico: Optional[DiagnosticoResult] = None
+
+
+# ---------------------------------------------------------------------------
+# Edición manual del horario (click-para-mover)
+# ---------------------------------------------------------------------------
+
+class BloqueValido(BaseModel):
+    bloque: int                 # índice del bloque en el catálogo
+    dia: str
+    hora_inicio: str
+    hora_fin: str
+    es_helper: bool
+    actual: bool                # True si es el bloque que ocupa hoy la sección
+    estado: str                 # "valido" | "conflicto"
+    motivos: list[str] = Field(default_factory=list)
+
+
+class BloquesValidosRequest(BaseModel):
+    sec_id: str
+    indice: int = 0             # cuál de los bloques de la sección se está moviendo
+
+
+class BloquesValidosResponse(BaseModel):
+    sec_id: str
+    indice: int
+    candidatos: list[BloqueValido] = Field(default_factory=list)
+
+
+class ConflictoItem(BaseModel):
+    tipo: str                   # "RD1" | "RD2" | ... | "intra" | "NRC"
+    motivo: str
+
+
+class MoverRequest(BaseModel):
+    sec_id: str
+    indice: int
+    destino: int                # índice del bloque destino en el catálogo
+
+
+class MoverResponse(BaseModel):
+    sec_id: str
+    seccion: SeccionAsignada    # sección con su nueva asignación
+    conflictos: list[ConflictoItem] = Field(default_factory=list)
