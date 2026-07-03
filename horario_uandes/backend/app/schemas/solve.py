@@ -138,6 +138,33 @@ class DecisionRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Persistencia: planificaciones y versiones
+# ---------------------------------------------------------------------------
+
+class PlanificacionInfo(BaseModel):
+    id: int
+    nombre: str
+    creada: str
+    actualizada: str
+    maestro_nombre: str = ""
+    salas_nombre: str = ""
+    n_versiones: int = 0
+    activa: bool = False
+
+
+class VersionInfo(BaseModel):
+    id: int
+    planificacion_id: int
+    nombre: str
+    creada: str
+    es_autosave: bool = False
+
+
+class GuardarVersionRequest(BaseModel):
+    nombre: str
+
+
+# ---------------------------------------------------------------------------
 # Edición manual del horario (click-para-mover)
 # ---------------------------------------------------------------------------
 

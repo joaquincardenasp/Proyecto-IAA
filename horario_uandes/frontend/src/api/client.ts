@@ -5,6 +5,8 @@ import type {
   MoverResponse,
   DecisionSeccion,
   ConflictoActivo,
+  PlanificacionInfo,
+  VersionInfo,
 } from '../types'
 
 // En desarrollo: BASE = '/api'  →  Vite proxea a http://localhost:8000/api
@@ -100,6 +102,65 @@ export async function getConflictos(): Promise<ConflictoActivo[]> {
   const r = await fetch(`${BASE}/conflictos`)
   if (!r.ok) return []
   return r.json()
+}
+
+// ── Planificaciones y versiones ────────────────────────────────────────────────
+
+export async function crearPlanificacion(
+  nombre: string, maestro: File, salas: File | null,
+): Promise<PlanificacionInfo> {
+  const fd = new FormData()
+  fd.append('nombre', nombre)
+  fd.append('maestro', maestro)
+  if (salas) fd.append('salas', salas)
+  const r = await fetch(`${BASE}/planificaciones`, { method: 'POST', body: fd })
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}))
+    throw new Error((e as { detail?: string }).detail ?? 'Error al crear la planificación')
+  }
+  return r.json()
+}
+
+export async function listarPlanificaciones(): Promise<PlanificacionInfo[]> {
+  const r = await fetch(`${BASE}/planificaciones`)
+  if (!r.ok) return []
+  return r.json()
+}
+
+export async function activarPlanificacion(id: number): Promise<void> {
+  const r = await fetch(`${BASE}/planificaciones/${id}/activar`, { method: 'POST' })
+  if (!r.ok) throw new Error('No se pudo activar la planificación')
+}
+
+export async function eliminarPlanificacion(id: number): Promise<void> {
+  await fetch(`${BASE}/planificaciones/${id}`, { method: 'DELETE' })
+}
+
+export async function guardarVersion(pid: number, nombre: string): Promise<VersionInfo> {
+  const r = await fetch(`${BASE}/planificaciones/${pid}/versiones`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nombre }),
+  })
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}))
+    throw new Error((e as { detail?: string }).detail ?? 'Error al guardar la versión')
+  }
+  return r.json()
+}
+
+export async function listarVersiones(pid: number): Promise<VersionInfo[]> {
+  const r = await fetch(`${BASE}/planificaciones/${pid}/versiones`)
+  if (!r.ok) return []
+  return r.json()
+}
+
+export async function cargarVersion(vid: number): Promise<void> {
+  const r = await fetch(`${BASE}/versiones/${vid}/cargar`, { method: 'POST' })
+  if (!r.ok) throw new Error('No se pudo cargar la versión')
+}
+
+export async function eliminarVersion(vid: number): Promise<void> {
+  await fetch(`${BASE}/versiones/${vid}`, { method: 'DELETE' })
 }
 
 export const EXPORT_URL = `${BASE}/export`

@@ -5,3 +5,5 @@ deap
 pandas
 openpyxl
 python-multipart
+sqlalchemy
+psycopg2-binary

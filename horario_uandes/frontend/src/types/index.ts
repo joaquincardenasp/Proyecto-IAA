@@ -152,6 +152,27 @@ export interface ConflictoActivo {
   secciones: string[]
 }
 
+// ── Persistencia: planificaciones y versiones ─────────────────────────────────
+
+export interface PlanificacionInfo {
+  id: number
+  nombre: string
+  creada: string
+  actualizada: string
+  maestro_nombre: string
+  salas_nombre: string
+  n_versiones: number
+  activa: boolean
+}
+
+export interface VersionInfo {
+  id: number
+  planificacion_id: number
+  nombre: string
+  creada: string
+  es_autosave: boolean
+}
+
 export interface SolveParams {
   carreras: string[]
   n_generaciones: number

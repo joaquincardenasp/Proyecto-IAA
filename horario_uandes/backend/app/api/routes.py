@@ -13,19 +13,26 @@ Flujo:
 from __future__ import annotations
 
 import asyncio
+import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from ..core.blocks import TODOS_BLOQUES
 from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
 from ..core.parser import cargar_datos, _estructura_bloques
-from ..core.diagnostico import diagnosticar
+from ..core.diagnostico import (
+    diagnosticar, Diagnostico, DiagnosticoUnidad, Sugerencia,
+)
 from ..core.edicion import aplicar_movimiento, bloques_validos, validar_asignacion
+from ..db import models_db as dbm
+from ..db.database import SessionLocal
 from ..core.reporter import generar_reporte_detallado
 from ..core.solver_cpsat import resolver_por_partes
 from ..core.solver_ga import (
@@ -46,9 +53,11 @@ from ..schemas.solve import (
     DecisionSeccion,
     DiagnosticoResult,
     DiagnosticoUnidadItem,
+    GuardarVersionRequest,
     MetricasResult,
     MoverRequest,
     MoverResponse,
+    PlanificacionInfo,
     ReporteDetallado,
     ResumenReporte,
     SeccionAsignada,
@@ -57,6 +66,7 @@ from ..schemas.solve import (
     SolveResult,
     StatusResponse,
     SugerenciaItem,
+    VersionInfo,
     ViolacionItem,
 )
 
@@ -83,6 +93,7 @@ _state: dict = {
     # Decisiones del usuario sobre estructura de bloques (persisten entre regeneraciones):
     "overrides":               {"distribucion": {}, "duracion": {}},
     "decisiones_cand":         [],       # candidatos a decisión (del parse fresco)
+    "planificacion_id":        None,     # planificación activa (para autosave/persistencia)
 }
 _lock     = asyncio.Lock()
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -270,6 +281,7 @@ def _solve_sync(req: SolveRequest) -> None:
         _state["status"]       = "ready"
         _state["progress"]     = "Completado"
         _state["error"]        = ""
+        _autosave()            # persistir el estado recién generado
 
     except Exception as exc:
         _state["status"]   = "error"
@@ -425,7 +437,12 @@ async def upload_files(files: list[UploadFile] = File(...)):
 
 @router.post("/solve", status_code=202)
 async def solve(req: SolveRequest, background_tasks: BackgroundTasks):
-    """Lanza el solver en background. Devuelve 409 si ya está corriendo."""
+    """Lanza el solver en background. Requiere una planificación activa. 409 si ya corre."""
+    if not _state.get("planificacion_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Crea o activa una planificación antes de generar el horario.",
+        )
     async with _lock:
         if _state["status"] == "running":
             raise HTTPException(status_code=409, detail="Solver ya está en ejecución")
@@ -568,6 +585,7 @@ def editar_mover(req: MoverRequest):
     except PermissionError:
         _state["excel_bytes"] = exportar_horario(datos, nueva, reporte=_state["reporte"])
 
+    _autosave()  # persistir la edición manual
     seccion = _build_secciones(datos, {req.sec_id: nueva[req.sec_id]})[0]
     return MoverResponse(
         sec_id=req.sec_id,
@@ -599,6 +617,7 @@ def set_distribucion(req: DecisionRequest):
     if req.opcion not in ("3-juntas", "2+1"):
         raise HTTPException(status_code=400, detail="Opción inválida (usa '3-juntas' o '2+1').")
     _state["overrides"]["distribucion"][req.sec_id] = req.opcion
+    _autosave()
     return _build_decisiones(_state["decisiones_cand"], _state["overrides"])
 
 
@@ -611,7 +630,247 @@ def set_duracion(req: DecisionRequest):
     if req.opcion not in ("1h", "2h"):
         raise HTTPException(status_code=400, detail="Opción inválida (usa '1h' o '2h').")
     _state["overrides"]["duracion"][req.sec_id] = req.opcion
+    _autosave()
     return _build_decisiones(_state["decisiones_cand"], _state["overrides"])
+
+
+# ---------------------------------------------------------------------------
+# Persistencia — planificaciones y versiones (SQLAlchemy)
+# ---------------------------------------------------------------------------
+
+def _serializar_estado() -> str:
+    """Serializa el estado actual del horario a JSON (para guardar una versión)."""
+    diag = _state["diagnostico"]
+    return json.dumps({
+        "estado":          _state["estado"],
+        "asignaciones":    _state["asignaciones"] or {},
+        "metricas":        _state["metricas"],
+        "reporte":         _state["reporte"],
+        "diagnostico":     asdict(diag) if diag else None,
+        "overrides":       _state["overrides"],
+        "decisiones_cand": _state["decisiones_cand"],
+    })
+
+
+def _diag_from_dict(d: dict) -> Diagnostico:
+    return Diagnostico(unidades=[
+        DiagnosticoUnidad(
+            carrera=u["carrera"], semestre=u["semestre"],
+            causa_principal=u["causa_principal"],
+            sugerencias=[Sugerencia(**s) for s in u["sugerencias"]],
+        )
+        for u in d.get("unidades", [])
+    ])
+
+
+def _restaurar_estado(estado_json: str, datos: DatosProblema) -> None:
+    """Restaura el estado del horario desde el JSON de una versión + los datos re-parseados."""
+    d = json.loads(estado_json) if estado_json else {}
+    _state["datos"]           = datos
+    _state["estado"]          = d.get("estado", "")
+    _state["asignaciones"]    = d.get("asignaciones") or {}
+    _state["metricas"]        = d.get("metricas")
+    _state["reporte"]         = d.get("reporte")
+    _state["diagnostico"]     = _diag_from_dict(d["diagnostico"]) if d.get("diagnostico") else None
+    _state["overrides"]       = d.get("overrides") or {"distribucion": {}, "duracion": {}}
+    _state["decisiones_cand"] = d.get("decisiones_cand") or []
+    _state["excel_bytes"] = (
+        exportar_horario(datos, _state["asignaciones"], reporte=_state["reporte"])
+        if _state["asignaciones"] else None
+    )
+    _state["status"] = "ready"
+    _state["progress"] = "Cargado"
+    _state["error"] = ""
+
+
+def _escribir_inputs(pl: "dbm.Planificacion") -> None:
+    """Escribe los blobs de la planificación en inputs/ (top-level) para poder parsear."""
+    INPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Remover solo Maestros previos (cargar_datos hace glob de Maestro*.xlsx) para evitar
+    # ambigüedad; NO se tocan catálogos u otros archivos del directorio.
+    for f in list(INPUTS_DIR.glob("[Mm]aestro*.xlsx")):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    if pl.maestro_bytes:
+        (INPUTS_DIR / (pl.maestro_nombre or "Maestro.xlsx")).write_bytes(pl.maestro_bytes)
+    if pl.salas_bytes:
+        (INPUTS_DIR / (pl.salas_nombre or "SALAS_ESPECIALES_ING.xlsx")).write_bytes(pl.salas_bytes)
+
+
+def _autosave() -> None:
+    """Guarda (upsert) el estado actual como versión de autoguardado de la planificación activa."""
+    pid = _state.get("planificacion_id")
+    if not pid or _state["status"] != "ready":
+        return
+    try:
+        with SessionLocal() as db:
+            pl = db.get(dbm.Planificacion, pid)
+            if not pl:
+                return
+            auto = next((v for v in pl.versiones if v.es_autosave), None)
+            if auto is None:
+                auto = dbm.Version(planificacion_id=pid, nombre="(autoguardado)", es_autosave=True)
+                db.add(auto)
+            auto.estado_json = _serializar_estado()
+            auto.creada = datetime.utcnow()
+            pl.actualizada = datetime.utcnow()
+            db.commit()
+    except Exception:
+        traceback.print_exc()
+
+
+def _pl_info(pl: "dbm.Planificacion") -> PlanificacionInfo:
+    return PlanificacionInfo(
+        id=pl.id, nombre=pl.nombre,
+        creada=pl.creada.isoformat() if pl.creada else "",
+        actualizada=pl.actualizada.isoformat() if pl.actualizada else "",
+        maestro_nombre=pl.maestro_nombre or "", salas_nombre=pl.salas_nombre or "",
+        n_versiones=sum(1 for v in pl.versiones if not v.es_autosave),
+        activa=(pl.id == _state.get("planificacion_id")),
+    )
+
+
+@router.post("/planificaciones", response_model=PlanificacionInfo)
+async def crear_planificacion(
+    nombre: str = Form(...),
+    maestro: UploadFile = File(...),
+    salas: UploadFile | None = File(None),
+):
+    """Crea una planificación con sus archivos de entrada (blobs) y la deja activa."""
+    maestro_bytes = await maestro.read()
+    salas_bytes = await salas.read() if salas is not None else None
+    with SessionLocal() as db:
+        pl = dbm.Planificacion(
+            nombre=nombre,
+            maestro_nombre=Path(maestro.filename or "Maestro.xlsx").name,
+            maestro_bytes=maestro_bytes,
+            salas_nombre=Path(salas.filename).name if salas and salas.filename else "",
+            salas_bytes=salas_bytes,
+        )
+        db.add(pl)
+        db.commit()
+        db.refresh(pl)
+        _escribir_inputs(pl)
+        _state["planificacion_id"] = pl.id
+        # Estado limpio hasta que se genere el horario
+        for k in ("estado", "asignaciones", "metricas", "reporte", "diagnostico",
+                  "excel_bytes", "datos", "decisiones_cand"):
+            _state[k] = None if k in ("asignaciones", "metricas", "reporte", "diagnostico",
+                                      "excel_bytes", "datos") else _state[k]
+        _state["estado"] = ""
+        _state["decisiones_cand"] = []
+        _state["overrides"] = {"distribucion": {}, "duracion": {}}
+        _state["status"] = "idle"
+        return _pl_info(pl)
+
+
+@router.get("/planificaciones", response_model=list[PlanificacionInfo])
+def listar_planificaciones():
+    with SessionLocal() as db:
+        pls = db.query(dbm.Planificacion).order_by(dbm.Planificacion.actualizada.desc()).all()
+        return [_pl_info(pl) for pl in pls]
+
+
+@router.post("/planificaciones/{pid}/activar")
+def activar_planificacion(pid: int):
+    """Activa una planificación: escribe sus archivos, re-parsea y restaura su autoguardado."""
+    with SessionLocal() as db:
+        pl = db.get(dbm.Planificacion, pid)
+        if not pl:
+            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        _escribir_inputs(pl)
+        _state["planificacion_id"] = pl.id
+        try:
+            datos = cargar_datos(INPUTS_DIR)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Error al leer los archivos: {exc}")
+        auto = next((v for v in pl.versiones if v.es_autosave), None)
+        if auto and auto.estado_json:
+            _restaurar_estado(auto.estado_json, datos)
+        else:
+            _state["datos"] = datos
+            _state["estado"] = ""
+            for k in ("asignaciones", "metricas", "reporte", "diagnostico", "excel_bytes"):
+                _state[k] = None
+            _state["status"] = "idle"
+        return {"detail": "Planificación activada", "restaurada": bool(auto)}
+
+
+@router.delete("/planificaciones/{pid}")
+def eliminar_planificacion(pid: int):
+    with SessionLocal() as db:
+        pl = db.get(dbm.Planificacion, pid)
+        if not pl:
+            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        db.delete(pl)
+        db.commit()
+    if _state.get("planificacion_id") == pid:
+        _state["planificacion_id"] = None
+    return {"detail": "Planificación eliminada"}
+
+
+@router.post("/planificaciones/{pid}/versiones", response_model=VersionInfo)
+def guardar_version(pid: int, req: GuardarVersionRequest):
+    """Guarda el estado actual del horario como una versión con nombre."""
+    if _state["status"] != "ready":
+        raise HTTPException(status_code=400, detail="No hay un horario para guardar.")
+    with SessionLocal() as db:
+        pl = db.get(dbm.Planificacion, pid)
+        if not pl:
+            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        v = dbm.Version(planificacion_id=pid, nombre=req.nombre, es_autosave=False,
+                        estado_json=_serializar_estado())
+        db.add(v)
+        db.commit()
+        db.refresh(v)
+        return VersionInfo(id=v.id, planificacion_id=pid, nombre=v.nombre,
+                           creada=v.creada.isoformat() if v.creada else "", es_autosave=False)
+
+
+@router.get("/planificaciones/{pid}/versiones", response_model=list[VersionInfo])
+def listar_versiones(pid: int):
+    with SessionLocal() as db:
+        pl = db.get(dbm.Planificacion, pid)
+        if not pl:
+            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        return [
+            VersionInfo(id=v.id, planificacion_id=pid, nombre=v.nombre,
+                        creada=v.creada.isoformat() if v.creada else "", es_autosave=v.es_autosave)
+            for v in sorted(pl.versiones, key=lambda x: x.creada or datetime.min, reverse=True)
+        ]
+
+
+@router.post("/versiones/{vid}/cargar")
+def cargar_version(vid: int):
+    """Carga una versión guardada: restaura el horario desde su JSON (re-parsea los datos)."""
+    with SessionLocal() as db:
+        v = db.get(dbm.Version, vid)
+        if not v:
+            raise HTTPException(status_code=404, detail="Versión no encontrada.")
+        pl = db.get(dbm.Planificacion, v.planificacion_id)
+        _escribir_inputs(pl)
+        _state["planificacion_id"] = pl.id
+        try:
+            datos = cargar_datos(INPUTS_DIR)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Error al leer los archivos: {exc}")
+        _restaurar_estado(v.estado_json, datos)
+    return {"detail": "Versión cargada"}
+
+
+@router.delete("/versiones/{vid}")
+def eliminar_version(vid: int):
+    with SessionLocal() as db:
+        v = db.get(dbm.Version, vid)
+        if not v:
+            raise HTTPException(status_code=404, detail="Versión no encontrada.")
+        if v.es_autosave:
+            raise HTTPException(status_code=400, detail="No se puede eliminar el autoguardado.")
+        db.delete(v)
+        db.commit()
+    return {"detail": "Versión eliminada"}
 
 
 @router.get("/export")

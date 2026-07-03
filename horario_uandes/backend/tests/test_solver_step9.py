@@ -26,7 +26,9 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.api.routes import _state
+from app.db.database import init_db
 
+init_db()   # asegurar tablas (TestClient sin context-manager puede no disparar startup)
 client = TestClient(app)
 
 TIMEOUT_SEC = 600   # CP-SAT + GA pueden tardar varios minutos
@@ -77,6 +79,19 @@ def test_step9():
     # 4. Export antes de solve → 404
     r = client.get("/api/export")
     check(r.status_code == 404, "GET /api/export sin solve → 404")
+
+    # 4b. Crear/activar una planificación (requisito para generar: no hay modo efímero)
+    inputs = Path(__file__).parent.parent / "inputs"
+    maestro = next(inputs.glob("[Mm]aestro*.xlsx"))
+    salas = inputs / "SALAS_ESPECIALES_ING.xlsx"
+    with open(maestro, "rb") as fm, open(salas, "rb") as fs:
+        rp = client.post(
+            "/api/planificaciones",
+            data={"nombre": "test step9"},
+            files={"maestro": (maestro.name, fm.read()),
+                   "salas": (salas.name, fs.read())},
+        )
+    check(rp.status_code == 200, "POST /api/planificaciones → 200 (planificación creada)")
 
     # 5. Intento de solve concurrente → 409 (simulamos estado "running")
     # TestClient ejecuta background tasks sincrónicamente, así que probamos el 409

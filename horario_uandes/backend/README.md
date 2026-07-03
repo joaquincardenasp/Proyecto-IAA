@@ -298,8 +298,8 @@ el resto no cambia). No bloquea el movimiento: informa los conflictos y el usuar
 
 | Método | Ruta | Qué hace |
 |--------|------|----------|
-| POST | `/upload` | Sube los Excel a `inputs/`. |
-| POST | `/solve` | Lanza el pipeline en background. |
+| POST | `/upload` | (Obsoleto) subía Excel a `inputs/`. Hoy los archivos se suben al crear una planificación. |
+| POST | `/solve` | Lanza el pipeline en background. **Requiere una planificación activa** (no hay modo efímero). |
 | GET | `/status` | Progreso (`idle/running/ready/error`). |
 | GET | `/results` | Resultado: `estado`, `secciones`, `metricas`, `reporte`, `diagnostico`. |
 | GET | `/diagnostico` | Solo el diagnóstico del último solve. |
@@ -309,7 +309,30 @@ el resto no cambia). No bloquea el movimiento: informa los conflictos y el usuar
 | GET | `/conflictos` | Lista todos los conflictos duros vigentes (deduplicados) para el panel de conflictos activos. |
 | POST | `/decisiones/distribucion` | Registra la distribución de una CLAS de 3h ("3-juntas"/"2+1"); se aplica al regenerar. |
 | POST | `/decisiones/duracion` | Registra la duración de un componente de 1h ("1h"/"2h"). |
-| GET | `/export` | Descarga el `.xlsx` generado. |
+| GET | `/export` | Descarga el `.xlsx` generado (formato del cliente). |
+| POST | `/planificaciones` | Crea una planificación (multipart: nombre + Maestro + salas como blobs) y la activa. |
+| GET | `/planificaciones` | Lista las planificaciones. |
+| POST | `/planificaciones/{id}/activar` | Activa una planificación (re-parsea sus archivos y restaura su autoguardado). |
+| DELETE | `/planificaciones/{id}` | Elimina una planificación y sus versiones. |
+| POST | `/planificaciones/{id}/versiones` | Guarda el horario actual como versión con nombre. |
+| GET | `/planificaciones/{id}/versiones` | Lista las versiones. |
+| POST | `/versiones/{id}/cargar` | Carga una versión guardada (restaura el horario). |
+| DELETE | `/versiones/{id}` | Elimina una versión (no el autoguardado). |
+
+### 5.5 Persistencia (planificaciones y versiones)
+
+El estado ya **no** es efímero. Con SQLAlchemy (`app/db/`) y la variable `DATABASE_URL`
+(SQLite local por defecto; **Postgres en prod**, ej. Render), el sistema guarda:
+
+- **Planificación:** un proyecto de horario que **posee sus archivos de entrada** (Maestro y
+  salas) como *blobs* en la DB → autocontenida, sobrevive recargas y redeploys.
+- **Versión:** un snapshot del horario (asignaciones + overrides + métricas + reporte +
+  diagnóstico) en JSON. Hay un **autoguardado** por planificación (se actualiza tras cada
+  solve/edición) y versiones **con nombre** que el usuario guarda a mano.
+
+Al recargar la página, el frontend re-activa la planificación guardada (localStorage) y
+restaura su autoguardado **sin re-resolver**. *(Pendiente fase 2: pins durables de las
+ediciones manuales al regenerar — hoy se advierte antes de descartarlas.)*
 
 `SolveResult.decisiones` lista las secciones que requieren decisión (CLAS de 3h sin
 distribución → no se programan hasta elegir) o admiten un ajuste (componentes de 1h). Las

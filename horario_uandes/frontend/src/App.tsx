@@ -1,14 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { AlertCircle, AlertTriangle, Check, Download, Loader2 } from "lucide-react";
 import { getStatus, getResults, postSolve, EXPORT_URL } from "./api/client";
-import type { SolveResult, StatusResponse } from "./types";
+import type { SolveResult, StatusResponse, PlanificacionInfo } from "./types";
 import SolverPanel from "./components/SolverPanel";
 import HorarioGrid from "./components/HorarioGrid";
 import MetricasPanel from "./components/MetricasPanel";
 import DiagnosticoPanel from "./components/DiagnosticoPanel";
 import DecisionesPanel from "./components/DecisionesPanel";
+import PlanificacionesPanel from "./components/PlanificacionesPanel";
 
-type Tab = "solver" | "horario" | "metricas" | "diagnostico" | "decisiones";
+type Tab = "planificaciones" | "solver" | "horario" | "metricas" | "diagnostico" | "decisiones";
 
 // ── Etapas del proceso ────────────────────────────────────────────────────────
 
@@ -42,13 +43,14 @@ function progressToStage(progress: string): number {
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("solver");
+  const [tab, setTab] = useState<Tab>("planificaciones");
   const [status, setStatus] = useState<StatusResponse>({
     status: "idle",
     progress: "",
     error: "",
   });
   const [results, setResults] = useState<SolveResult | null>(null);
+  const [activa, setActiva] = useState<PlanificacionInfo | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -93,6 +95,13 @@ export default function App() {
   const nDecisionesPend = decisiones.filter((d) => d.requerida && !d.actual).length;
 
   const regenerar = useCallback(async () => {
+    if (
+      !window.confirm(
+        "Regenerar recreará el horario desde cero y descartará las ediciones manuales de " +
+          "bloques (los movimientos). Las decisiones de distribución sí se conservan. ¿Continuar?",
+      )
+    )
+      return;
     try {
       await postSolve();
       startPolling();
@@ -101,8 +110,25 @@ export default function App() {
     }
   }, [startPolling]);
 
+  // Tras activar/cargar una planificación o versión: refrescar estado y resultados.
+  const onRestaurado = useCallback(async () => {
+    try {
+      const s = await getStatus();
+      setStatus(s);
+      if (s.status === "ready") {
+        setResults(await getResults());
+        setTab("horario");
+      } else {
+        setResults(null);
+      }
+    } catch (e) {
+      console.error("Restaurar error:", e);
+    }
+  }, []);
+
   const TABS: { id: Tab; label: string; disabled?: boolean }[] = [
-    { id: "solver", label: "Generar horario" },
+    { id: "planificaciones", label: "Planificaciones" },
+    { id: "solver", label: "Generar horario", disabled: !activa },
     { id: "horario", label: "Horario", disabled: !tieneHorario },
     { id: "metricas", label: "Métricas", disabled: !results?.metricas },
     { id: "diagnostico", label: "Diagnóstico", disabled: !tieneDiagnostico },
@@ -350,8 +376,16 @@ export default function App() {
 
       {/* ── Contenido ─────────────────────────────────────────────────────── */}
       <main className="flex-1 max-w-screen-xl mx-auto w-full px-6 py-8">
+        {tab === "planificaciones" && (
+          <PlanificacionesPanel onRestaurado={onRestaurado} onActivaChange={setActiva} />
+        )}
         {tab === "solver" && (
-          <SolverPanel status={status} onSolveStarted={startPolling} />
+          <SolverPanel
+            status={status}
+            onSolveStarted={startPolling}
+            planificacion={activa}
+            onIrAPlanificaciones={() => setTab("planificaciones")}
+          />
         )}
         {tab === "horario" && tieneHorario && (
           <HorarioGrid
