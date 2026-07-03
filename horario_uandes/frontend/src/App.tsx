@@ -1,9 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { AlertCircle, AlertTriangle, Check, Download, Loader2, ChevronLeft } from "lucide-react";
-import { getStatus, getResults, postSolve, activarPlanificacion, EXPORT_URL } from "./api/client";
+import { AlertCircle, AlertTriangle, Check, Download, Loader2, ChevronLeft, LogOut } from "lucide-react";
+import {
+  getStatus, getResults, postSolve, activarPlanificacion, descargarExcel,
+  AUTH_ENABLED, getMe, logout, type Usuario,
+} from "./api/client";
 import type { SolveResult, StatusResponse, PlanificacionInfo } from "./types";
+import LoginScreen from "./components/LoginScreen";
 import SolverPanel from "./components/SolverPanel";
-import HorarioGrid from "./components/HorarioGrid";
+import HorarioWorkspace from "./components/HorarioWorkspace";
 import MetricasPanel from "./components/MetricasPanel";
 import DiagnosticoPanel from "./components/DiagnosticoPanel";
 import DecisionesPanel from "./components/DecisionesPanel";
@@ -40,7 +44,15 @@ export default function App() {
   const [status, setStatus] = useState<StatusResponse>({ status: "idle", progress: "", error: "" });
   const [results, setResults] = useState<SolveResult | null>(null);
   const [activa, setActiva] = useState<PlanificacionInfo | null>(null);
+  const [user, setUser] = useState<Usuario | null>(null);
+  const [authChecked, setAuthChecked] = useState(!AUTH_ENABLED);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Verificar sesión al montar (solo si el auth está activo).
+  useEffect(() => {
+    if (!AUTH_ENABLED) return;
+    getMe().then((u) => { setUser(u); setAuthChecked(true); }).catch(() => setAuthChecked(true));
+  }, []);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -123,37 +135,49 @@ export default function App() {
 
   const enWorkspace = vista === "workspace";
 
+  // ── Gate de autenticación ────────────────────────────────────────────────
+  if (AUTH_ENABLED && !authChecked) {
+    return (
+      <div className="min-h-screen bg-[#F7F8FA] flex items-center justify-center">
+        <Loader2 size={22} className="animate-spin text-gray-400" />
+      </div>
+    );
+  }
+  if (AUTH_ENABLED && !user) {
+    return <LoginScreen onLogin={setUser} />;
+  }
+
   return (
-    <div className="min-h-screen bg-[#FAFAFA] flex flex-col">
-      {/* ── Header institucional ──────────────────────────────────────────── */}
-      <header className="bg-[#B71C1C] shrink-0">
-        <div className="max-w-screen-xl mx-auto px-6 py-4 flex items-center gap-5">
-          <div className="border-r border-red-700 pr-5 shrink-0">
-            <span className="text-white font-bold text-sm tracking-widest uppercase">Uandes</span>
+    <div className="min-h-screen bg-[#F7F8FA] flex flex-col">
+      {/* ── Header (claro, con línea de acento roja) ──────────────────────── */}
+      <header className="bg-white border-b-2 border-[#B71C1C] shrink-0">
+        <div className="max-w-[1700px] mx-auto px-6 py-3.5 flex items-center gap-5">
+          <div className="border-r border-gray-200 pr-5 shrink-0">
+            <span className="text-[#B71C1C] font-bold text-sm tracking-widest uppercase">Uandes</span>
           </div>
 
           {enWorkspace && activa ? (
             <div className="flex items-center gap-3 flex-1 min-w-0">
               <button
                 onClick={volver}
-                className="flex items-center gap-1 text-xs font-medium text-red-100
-                           hover:text-white hover:bg-red-800 px-2 py-1 rounded transition-colors shrink-0"
+                className="flex items-center gap-1 text-xs font-medium text-gray-500
+                           hover:text-gray-900 hover:bg-gray-100 px-2 py-1 rounded transition-colors shrink-0"
               >
                 <ChevronLeft size={14} /> Planificaciones
               </button>
               <div className="min-w-0">
-                <h1 className="text-white font-semibold text-sm leading-tight truncate">
+                <h1 className="text-gray-900 font-semibold text-sm leading-tight truncate">
                   {activa.nombre}
                 </h1>
-                <p className="text-red-300 text-xs leading-tight truncate">Generador de Horarios</p>
+                <p className="text-gray-400 text-xs leading-tight truncate">Generador de Horarios</p>
               </div>
             </div>
           ) : (
             <div className="flex-1 min-w-0">
-              <h1 className="text-white font-semibold text-sm leading-tight truncate">
+              <h1 className="text-gray-900 font-semibold text-sm leading-tight truncate">
                 Generador de Horarios
               </h1>
-              <p className="text-red-300 text-xs mt-0.5 truncate">
+              <p className="text-gray-400 text-xs mt-0.5 truncate">
                 Facultad de Ingeniería y Ciencias Aplicadas
               </p>
             </div>
@@ -161,18 +185,32 @@ export default function App() {
 
           <div className="flex items-center gap-3 shrink-0">
             {isRunning && (
-              <span className="flex items-center gap-1.5 text-xs text-red-200">
+              <span className="flex items-center gap-1.5 text-xs text-gray-500">
                 <Loader2 size={13} className="animate-spin" /> Procesando
               </span>
             )}
             {enWorkspace && tieneHorario && (
-              <a
-                href={EXPORT_URL} download="horario_generado.xlsx"
-                className="flex items-center gap-1.5 text-xs font-medium bg-white text-[#B71C1C]
-                           hover:bg-red-50 px-3 py-1.5 rounded transition-colors"
+              <button
+                onClick={() => descargarExcel().catch((e) => alert(String(e)))}
+                className="flex items-center gap-1.5 text-xs font-medium bg-gray-900 text-white
+                           hover:bg-gray-800 px-3 py-1.5 rounded transition-colors"
               >
                 <Download size={13} /> Descargar Excel
-              </a>
+              </button>
+            )}
+            {AUTH_ENABLED && user && (
+              <div className="flex items-center gap-2 pl-3 border-l border-gray-200">
+                <span className="text-xs text-gray-500 max-w-[170px] truncate hidden sm:block">
+                  {user.email}
+                </span>
+                <button
+                  onClick={() => { logout(); setUser(null); }}
+                  title="Cerrar sesión"
+                  className="text-gray-400 hover:text-gray-700 p-1 rounded transition-colors"
+                >
+                  <LogOut size={15} />
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -181,7 +219,7 @@ export default function App() {
       {/* ── Barra de pestañas (solo en el espacio de trabajo) ─────────────── */}
       {enWorkspace && (
         <div className="bg-white border-b border-gray-200 shrink-0">
-          <div className="max-w-screen-xl mx-auto px-6">
+          <div className="max-w-[1700px] mx-auto px-6">
             <nav className="flex">
               {TABS.map((t) => (
                 <button
@@ -222,7 +260,7 @@ export default function App() {
       {/* ── Progreso por etapas ───────────────────────────────────────────── */}
       {enWorkspace && isRunning && (
         <div className="bg-white border-b border-gray-100 py-4 shrink-0">
-          <div className="max-w-screen-xl mx-auto px-6">
+          <div className="max-w-[1700px] mx-auto px-6">
             <div className="flex items-center">
               {STAGES.map((stage, i) => {
                 const num = i + 1;
@@ -261,7 +299,7 @@ export default function App() {
       {/* ── Banners (solo en workspace) ───────────────────────────────────── */}
       {enWorkspace && status.status === "error" && status.error && (
         <div className="bg-red-50 border-b border-red-200 px-6 py-2.5 shrink-0">
-          <div className="max-w-screen-xl mx-auto flex items-center gap-2 text-sm text-red-700">
+          <div className="max-w-[1700px] mx-auto flex items-center gap-2 text-sm text-red-700">
             <AlertCircle size={14} className="shrink-0" />
             {status.error}
           </div>
@@ -271,7 +309,7 @@ export default function App() {
       {enWorkspace && results && results.estado !== "FACTIBLE" && status.status === "ready" && (
         <div className={`border-b px-6 py-2.5 shrink-0 ${
           results.estado === "INFEASIBLE" ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"}`}>
-          <div className={`max-w-screen-xl mx-auto flex items-center gap-2 text-sm ${
+          <div className={`max-w-[1700px] mx-auto flex items-center gap-2 text-sm ${
             results.estado === "INFEASIBLE" ? "text-red-700" : "text-amber-700"}`}>
             <AlertTriangle size={14} className="shrink-0" />
             {results.estado === "INFEASIBLE" ? (
@@ -296,7 +334,7 @@ export default function App() {
 
       {enWorkspace && nDecisionesPend > 0 && status.status === "ready" && (
         <div className="bg-red-50 border-b border-red-200 px-6 py-2.5 shrink-0">
-          <div className="max-w-screen-xl mx-auto flex items-center gap-2 text-sm text-red-700">
+          <div className="max-w-[1700px] mx-auto flex items-center gap-2 text-sm text-red-700">
             <AlertTriangle size={14} className="shrink-0" />
             <span>
               {nDecisionesPend} clase{nDecisionesPend !== 1 ? "s" : ""} de 3h sin distribución definida —
@@ -310,7 +348,7 @@ export default function App() {
       )}
 
       {/* ── Contenido ─────────────────────────────────────────────────────── */}
-      <main className="flex-1 max-w-screen-xl mx-auto w-full px-6 py-8">
+      <main className="flex-1 max-w-[1700px] mx-auto w-full px-6 py-8">
         {vista === "inicio" && <InicioPlanificaciones onAbrir={abrir} />}
 
         {enWorkspace && tab === "solver" && (
@@ -319,10 +357,12 @@ export default function App() {
             planificacion={activa} onIrAPlanificaciones={volver}
           />
         )}
-        {enWorkspace && tab === "horario" && tieneHorario && (
-          <HorarioGrid
+        {enWorkspace && tab === "horario" && tieneHorario && activa && (
+          <HorarioWorkspace
             secciones={results!.secciones}
+            planificacionId={activa.id}
             onEdited={async () => setResults(await getResults())}
+            onRestaurado={onRestaurado}
           />
         )}
         {enWorkspace && tab === "metricas" && results?.metricas && (

@@ -13,9 +13,9 @@ const TIPO_LABEL: Record<TipoSeccion, string> = {
   LABT: 'Lab / Taller',
 }
 const TIPO_BAR: Record<TipoSeccion, string> = {
-  CLAS: 'bg-[#B71C1C]',
-  AYUD: 'bg-gray-500',
-  LABT: 'bg-stone-500',
+  CLAS: 'bg-blue-700',
+  AYUD: 'bg-emerald-600',
+  LABT: 'bg-violet-600',
 }
 
 // ── Restricciones blandas optimizadas ────────────────────────────────────────
@@ -23,6 +23,7 @@ const TIPO_BAR: Record<TipoSeccion, string> = {
 const RESTRICCIONES = [
   { id: 'RB1', label: 'Labs de Programación en bloques consecutivos',     peso: 100 },
   { id: 'RB2', label: 'Profesores de jornada sin bloques extremos',       peso: 80  },
+  { id: 'RB5', label: 'Profesores sin ventanas (huecos) el mismo día',    peso: 60  },
   { id: 'RB3', label: 'Componentes del mismo curso en días distintos',    peso: 50  },
   { id: 'RB4', label: 'Máximo una sesión por tipo, curso y día',          peso: 50  },
 ]
@@ -70,7 +71,7 @@ export default function MetricasPanel({ metricas, secciones, reporte }: Props) {
       {/* ── Estadísticas principales ──────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard
-          icon={<BookOpen size={16} className="text-[#B71C1C]" />}
+          icon={<BookOpen size={16} className="text-gray-500" />}
           value={metricas.n_secciones}
           label="Secciones asignadas"
         />
@@ -112,7 +113,7 @@ export default function MetricasPanel({ metricas, secciones, reporte }: Props) {
                   </span>
                   <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-[#B71C1C] rounded-full transition-all duration-300"
+                      className="h-full bg-blue-700 rounded-full transition-all duration-300"
                       style={{ width: `${pct}%` }}
                     />
                   </div>
@@ -271,7 +272,7 @@ function StatCard({
 }) {
   return (
     <div className={`bg-white border rounded-lg p-4
-      ${highlight ? 'border-t-2 border-t-[#B71C1C] border-gray-200' : 'border-gray-200'}`}>
+      ${highlight ? 'border-t-2 border-t-blue-700 border-gray-200' : 'border-gray-200'}`}>
       <div className="flex items-center gap-2 mb-2">
         {icon}
       </div>
@@ -393,6 +394,7 @@ const TIPO_LABEL_RB: Record<string, string> = {
   RB2: 'Profesores jornada en horarios extremos',
   RB3: 'Componentes del mismo curso en mismo día',
   RB4: 'Múltiples bloques del componente en un día',
+  RB5: 'Ventana (hueco) en horario del profesor',
 }
 
 function GrupoViolaciones({

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
-  Plus, Trash2, Loader2, Upload, X, FolderOpen, Calendar, Layers, ChevronRight,
+  Plus, Trash2, Loader2, Upload, X, FolderOpen, Calendar, Layers, ChevronRight, CheckCircle2,
 } from 'lucide-react'
 import type { PlanificacionInfo } from '../types'
 import {
@@ -165,8 +165,8 @@ function CrearModal({
   const [creando, setCreando] = useState(false)
 
   async function crear() {
-    if (!nombre.trim() || !maestro) {
-      setError('Nombre y archivo Maestro son obligatorios.'); return
+    if (!nombre.trim() || !maestro || !salas) {
+      setError('Nombre, Maestro y Salas especiales son obligatorios.'); return
     }
     setCreando(true); setError('')
     try {
@@ -207,7 +207,7 @@ function CrearModal({
             className="w-full text-sm border border-gray-300 rounded px-3 py-2 outline-none focus:border-gray-500"
           />
           <FileInput label="Maestro (.xlsx) — requerido" file={maestro} onChange={setMaestro} />
-          <FileInput label="Salas especiales (.xlsx) — opcional" file={salas} onChange={setSalas} />
+          <FileInput label="Salas especiales (.xlsx) — requerido" file={salas} onChange={setSalas} />
         </div>
 
         <div className="flex justify-end gap-2 mt-5">
@@ -236,9 +236,14 @@ function FileInput({
   onChange: (f: File | null) => void
 }) {
   return (
-    <label className="flex items-center gap-2 text-xs border border-gray-300 rounded px-3 py-2.5
-                      cursor-pointer hover:border-gray-400 text-gray-600 truncate">
-      <Upload size={13} className="shrink-0 text-gray-400" />
+    <label className={`flex items-center gap-2 text-xs border rounded px-3 py-2.5 cursor-pointer
+                       truncate transition-colors
+      ${file
+        ? 'border-emerald-400 bg-emerald-50 text-emerald-800'
+        : 'border-gray-300 hover:border-gray-400 text-gray-600'}`}>
+      {file
+        ? <CheckCircle2 size={14} className="shrink-0 text-emerald-600" />
+        : <Upload size={13} className="shrink-0 text-gray-400" />}
       <span className="truncate">{file ? file.name : label}</span>
       <input type="file" accept=".xlsx" className="hidden"
              onChange={e => onChange(e.target.files?.[0] ?? null)} />

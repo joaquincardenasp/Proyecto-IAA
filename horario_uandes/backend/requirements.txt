@@ -7,3 +7,5 @@ openpyxl
 python-multipart
 sqlalchemy
 psycopg2-binary
+google-auth
+pyjwt

@@ -334,6 +334,26 @@ Al recargar la página, el frontend re-activa la planificación guardada (localS
 restaura su autoguardado **sin re-resolver**. *(Pendiente fase 2: pins durables de las
 ediciones manuales al regenerar — hoy se advierte antes de descartarlas.)*
 
+### 5.6 Autenticación (Google + dominio institucional)
+
+Acceso restringido a correos **@uandes.cl / @miuandes.cl** vía Google (`app/auth.py`):
+- El frontend obtiene un ID token de Google (Google Identity Services); `POST /auth/google`
+  lo verifica, valida el dominio del correo y emite una **sesión JWT propia** (`Bearer`).
+- Todas las rutas de `/api` (salvo `/api/health` y `/api/auth/*`) exigen sesión válida
+  (`require_user`). `GET /auth/me` devuelve el usuario actual.
+- **Si `GOOGLE_CLIENT_ID` no está seteado, el auth queda DESACTIVADO** (acceso abierto) —
+  así el desarrollo local y los tests funcionan sin configurar nada.
+
+**Variables de entorno:**
+
+| Variable | Dónde | Descripción |
+|----------|-------|-------------|
+| `GOOGLE_CLIENT_ID` | backend | Client ID de OAuth. Presente ⇒ auth activo. |
+| `AUTH_SECRET` | backend | Secreto para firmar las sesiones JWT (obligatorio en prod). |
+| `ALLOWED_DOMAINS` | backend | Dominios permitidos (default `uandes.cl,miuandes.cl`). |
+| `SESSION_DAYS` | backend | Duración de la sesión (default 7). |
+| `VITE_GOOGLE_CLIENT_ID` | frontend | El **mismo** Client ID (habilita el login en la UI). |
+
 `SolveResult.decisiones` lista las secciones que requieren decisión (CLAS de 3h sin
 distribución → no se programan hasta elegir) o admiten un ajuste (componentes de 1h). Las
 decisiones se guardan como *overrides* en el estado y se aplican en la siguiente regeneración

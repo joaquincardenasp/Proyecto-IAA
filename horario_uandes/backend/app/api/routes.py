@@ -397,11 +397,6 @@ def _build_diagnostico(diag) -> DiagnosticoResult:
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.get("/health")
-def health():
-    return {"status": "ok"}
-
-
 @router.post("/upload")
 async def upload_files(files: list[UploadFile] = File(...)):
     """Sube uno o más archivos Excel al directorio inputs/."""
@@ -666,14 +661,18 @@ def _diag_from_dict(d: dict) -> Diagnostico:
 def _restaurar_estado(estado_json: str, datos: DatosProblema) -> None:
     """Restaura el estado del horario desde el JSON de una versión + los datos re-parseados."""
     d = json.loads(estado_json) if estado_json else {}
+    # Candidatos a decisión del parse fresco, ANTES de aplicar overrides.
+    _state["decisiones_cand"] = _candidatos_decision(datos)
+    _state["overrides"]       = d.get("overrides") or {"distribucion": {}, "duracion": {}}
+    # CLAVE: re-aplicar las decisiones guardadas a los datos re-parseados, para que la
+    # estructura de las secciones (2+1, duración) coincida con las asignaciones guardadas.
+    _aplicar_overrides(datos, _state["overrides"])
     _state["datos"]           = datos
     _state["estado"]          = d.get("estado", "")
     _state["asignaciones"]    = d.get("asignaciones") or {}
     _state["metricas"]        = d.get("metricas")
     _state["reporte"]         = d.get("reporte")
     _state["diagnostico"]     = _diag_from_dict(d["diagnostico"]) if d.get("diagnostico") else None
-    _state["overrides"]       = d.get("overrides") or {"distribucion": {}, "duracion": {}}
-    _state["decisiones_cand"] = d.get("decisiones_cand") or []
     _state["excel_bytes"] = (
         exportar_horario(datos, _state["asignaciones"], reporte=_state["reporte"])
         if _state["asignaciones"] else None
@@ -746,21 +745,62 @@ def _pl_info(pl: "dbm.Planificacion") -> PlanificacionInfo:
     )
 
 
+def _validar_archivos(maestro_bytes: bytes, salas_bytes: bytes) -> None:
+    """Valida que los archivos subidos tengan el formato esperado. Lanza ValueError si no."""
+    import io
+    import pandas as pd
+    from ..core.parser import _mapear_columnas
+
+    # ── Maestro ──────────────────────────────────────────────────────────────
+    try:
+        xl = pd.ExcelFile(io.BytesIO(maestro_bytes))
+    except Exception:
+        raise ValueError("El archivo Maestro no es un Excel (.xlsx) válido.")
+    hoja_m = next((h for h in xl.sheet_names if h.strip().upper() == "MAESTRO"), None)
+    if not hoja_m:
+        raise ValueError("El Maestro debe contener una hoja llamada 'MAESTRO'. "
+                         "¿Seguro que subiste el archivo correcto?")
+    try:
+        df = xl.parse(hoja_m, nrows=5)
+    except Exception:
+        raise ValueError("No se pudo leer la hoja 'MAESTRO' del archivo.")
+    cols = _mapear_columnas(df)
+    faltan = [k for k in ("MANDANTE", "CODIGO", "SECCIONES") if not cols.get(k)]
+    if faltan:
+        etiquetas = {"MANDANTE": "CURSO MANDANTE", "CODIGO": "CODIGO", "SECCIONES": "SECCIONES"}
+        raise ValueError("El Maestro no tiene las columnas requeridas: "
+                         f"{', '.join(etiquetas[k] for k in faltan)}.")
+
+    # ── Salas especiales ─────────────────────────────────────────────────────
+    try:
+        xls = pd.ExcelFile(io.BytesIO(salas_bytes))
+    except Exception:
+        raise ValueError("El archivo de salas especiales no es un Excel (.xlsx) válido.")
+    hojas_s = {h.strip().upper() for h in xls.sheet_names}
+    if "BBDD" not in hojas_s and "SALAS ESPECIALES" not in hojas_s:
+        raise ValueError("El archivo de salas debe contener la hoja 'BBDD' "
+                         "(o 'SALAS ESPECIALES'). ¿Subiste el archivo correcto?")
+
+
 @router.post("/planificaciones", response_model=PlanificacionInfo)
 async def crear_planificacion(
     nombre: str = Form(...),
     maestro: UploadFile = File(...),
-    salas: UploadFile | None = File(None),
+    salas: UploadFile = File(...),
 ):
     """Crea una planificación con sus archivos de entrada (blobs) y la deja activa."""
     maestro_bytes = await maestro.read()
-    salas_bytes = await salas.read() if salas is not None else None
+    salas_bytes = await salas.read()
+    try:
+        _validar_archivos(maestro_bytes, salas_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     with SessionLocal() as db:
         pl = dbm.Planificacion(
             nombre=nombre,
             maestro_nombre=Path(maestro.filename or "Maestro.xlsx").name,
             maestro_bytes=maestro_bytes,
-            salas_nombre=Path(salas.filename).name if salas and salas.filename else "",
+            salas_nombre=Path(salas.filename or "SALAS.xlsx").name,
             salas_bytes=salas_bytes,
         )
         db.add(pl)

@@ -362,6 +362,10 @@ def _rb2(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
         s = sec_by_id.get(sec_id)
         if not s:
             continue
+        # Solo cuenta si la sección ata al profesor a ese bloque (CLAS, o LABT con profesor
+        # propio). Las AYUD / LABT dictadas por un TA (afecta_disponibilidad=False) no.
+        if not s.afecta_disponibilidad:
+            continue
         prof = datos.profesores.get(s.rut_profesor)
         if not prof or prof.tipo != TipoProfesor.JORNADA:
             continue
