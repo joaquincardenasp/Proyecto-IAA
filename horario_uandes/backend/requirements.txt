@@ -5,3 +5,8 @@ deap
 pandas
 openpyxl
 python-multipart
+sqlalchemy
+psycopg2-binary
+google-auth
+requests
+pyjwt

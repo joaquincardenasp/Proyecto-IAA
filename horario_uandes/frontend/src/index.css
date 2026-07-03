@@ -5,10 +5,11 @@
 @layer base {
   html,
   body {
-    background-color: #fafafa;
-    color: #1a1a1a;
+    background-color: #f7f8fa;
+    color: #111827;
     font-family: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
 }
 

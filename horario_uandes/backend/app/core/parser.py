@@ -140,13 +140,17 @@ def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
                                "laboratorios programar", "talleres programar"),
         # Profesores
         "RUT_PROF1":    buscar("rut profesor 1"),
-        "NOMBRE_PROF1": buscar("nombre profesor 1"),
+        "NOMBRE_PROF1": buscar("nombre profesor banner 1", "nombre profesor 1"),
         "RUT_PROF2":    buscar("rut profesor 2"),
         "NOMBRE_PROF2": buscar("nombre profesor 2"),
         "RUT_LABT":     buscar("rut profesor labt"),
         "NOMBRE_LABT":  buscar("nombre profesor labt", "profesor labt"),
         # Distribución de bloques
         "DISTRIBUCION": buscar("2+1 o 3?", "2+1 o 3"),
+        # Metadatos para el Excel de salida (formato histórico)
+        "AREA":         buscar("area"),
+        "NRC":          buscar("nrc"),
+        "CONECTOR":     buscar("conector de liga", "conector liga"),
         # NOTA: las columnas LUNES-VIERNES del Maestro NO se mapean aquí: la disponibilidad
         # se lee de las hojas PROFESORES / RESPUESTAS / DisponibilidadesFueraForms.
     }
@@ -396,48 +400,64 @@ def _leer_disp_fuera(xl: pd.ExcelFile) -> dict[str, set[int]]:
     return {rut: _subblocks_a_bloques(dd) for rut, dd in por_rut.items() if rut}
 
 
-def _calcular_bloques_clas(horas: int, distribucion: str) -> int:
+def _estructura_bloques(componente: str, horas: int, distribucion: str) -> dict:
     """
-    Bloques necesarios para CLAS según horas y distribución:
-      "3" o "3-juntas" → 1 bloque de 3h (independiente de las horas)
-      horas == 3 sin distribución explícita → 1 bloque de 3h
-      "2+1" → tratar como 2h en v1
-      Resto → ceil(horas/2), mínimo 1
-    """
-    d = _norm(distribucion or "")
-    if d in ("3", "3-juntas"):
-        return 1
-    if horas <= 0:
-        return 1
-    if horas == 3:
-        return 1
-    return max(1, math.ceil(horas / 2))
+    Traduce (horas a programar, distribución) en la estructura de bloques de UNA sección,
+    garantizando el invariante **cantidad × duración = horas** (salvo el caso indefinido).
 
+    Retorna dict: {cantidad, tipos, duracion, indefinida, aviso}.
+      - cantidad/tipos/duracion → cómo se modela la sección.
+      - indefinida=True → CLAS de 3h sin distribución: NO se programa (no se adivina); el
+        usuario debe elegir 3-juntas o 2+1.
+      - aviso → código de advertencia para el usuario (o None).
 
-def _calcular_bloques(horas: int) -> int:
-    """Bloques para AYUD y LABT: ceil(horas/2), mínimo 1."""
-    if horas <= 0:
-        return 1
-    if horas == 3:
-        return 1
-    return max(1, math.ceil(horas / 2))
-
-
-def _duracion_bloque_clas(horas: int, distribucion: str) -> str:
-    """
-    Duración de bloque para CLAS. Solo '3h' cuando la distribución indica EXPLÍCITAMENTE
-    una única sesión de 3h ("3" o "3-juntas") y el curso tiene ≥3 horas. Las variantes
-    "2+1" (clase partida) se tratan como bloques de 2h en v1, aunque sumen 3 horas.
+    Reglas:
+      CLAS y horas == 3:
+        "3"/"3-juntas" → 1 bloque de 3h.
+        "2+1"*         → 2 bloques: uno de 2h + uno de 1h.
+        vacío/otro     → INDEFINIDA (se pide decisión al usuario).
+      horas != 3 (cualquier componente): se IGNORA la distribución (la columna "2+1 o 3?"
+        solo aplica a secciones de 3h). Si venía con marcador → aviso de inconsistencia.
+        horas == 1 → 1 bloque de 1h (aviso: componente de 1h, inusual, editable a 2h).
+        resto      → ceil(horas/2) bloques de 2h.
+      AYUD/LABT y horas == 3 → 1 bloque de 3h (3 horas seguidas).
     """
     d = _norm(distribucion or "")
-    if d in ("3", "3-juntas") and horas >= 3:
-        return "3h"
-    return "2h"
+    tiene_marcador = bool(d)
+
+    # ── Secciones de 3 horas: la distribución SÍ importa ──────────────────────
+    if horas == 3:
+        if componente == "CLAS":
+            if d in ("3", "3-juntas"):
+                return dict(cantidad=1, tipos=[], duracion="3h", indefinida=False, aviso=None)
+            if "2+1" in d:
+                return dict(cantidad=2, tipos=["2h", "1h"], duracion="2h",
+                            indefinida=False, aviso=None)
+            # 3h sin distribución → no adivinar
+            return dict(cantidad=0, tipos=[], duracion="2h", indefinida=True,
+                        aviso="sin_distribucion_3h")
+        # AYUD/LABT de 3 horas: una sesión de 3h seguidas
+        return dict(cantidad=1, tipos=[], duracion="3h", indefinida=False, aviso=None)
+
+    # ── horas != 3: la columna de distribución NO aplica ──────────────────────
+    aviso = "distribucion_ignorada" if tiene_marcador else None
+    if horas == 1:
+        return dict(cantidad=1, tipos=[], duracion="1h", indefinida=False,
+                    aviso=aviso or "componente_1h")
+    cantidad = max(1, math.ceil(horas / 2)) if horas > 0 else 1
+    return dict(cantidad=cantidad, tipos=[], duracion="2h", indefinida=False, aviso=aviso)
 
 
-def _duracion_bloque(horas: int) -> str:
-    """Duración de bloque para AYUD/LABT: '3h' solo si el componente es de 3 horas seguidas."""
-    return "3h" if horas == 3 else "2h"
+_AVISOS_ESTRUCTURA = {
+    "sin_distribucion_3h": ("CLAS de 3h SIN distribución definida (3-juntas o 2+1) → NO se "
+                            "programa hasta que el usuario elija la distribución"),
+    "distribucion_ignorada": "distribución ignorada (el curso no es de 3h)",
+    "componente_1h": "componente de 1 hora (inusual) → 1 bloque de 1h; puede editarse a 2h",
+}
+
+
+def _msg_aviso_estructura(sec_id: str, aviso: str, horas: int) -> str:
+    return f"[AVISO] {sec_id} ({horas}h): {_AVISOS_ESTRUCTURA.get(aviso, aviso)}"
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +570,54 @@ def _leer_ruts_jornada(xl: pd.ExcelFile) -> set[str]:
 # Procesamiento de la hoja MAESTRO
 # ---------------------------------------------------------------------------
 
+_ESPECIALIDADES = ("ICI", "IOC", "ICE", "ICC", "ICA")
+
+
+def _num_semestre(sem: str) -> int:
+    """Número de semestre ignorando sufijos de mención ('10a' → 10). -1 si no hay dígitos."""
+    d = "".join(ch for ch in str(sem) if ch.isdigit())
+    return int(d) if d else -1
+
+
+def _expandir_plan_comun_superior(cursos: dict[str, Curso]) -> list[str]:
+    """
+    Los cursos de Plan Común de semestre 5+ los cursan TODOS los alumnos, sea cual sea su
+    especialidad (ej. Filosofía de las Ciencias en sem 5, Ética en sem 10). Por lo tanto
+    deben no-topar (RD1) con cualquier curso del mismo semestre de cualquier carrera.
+
+    Se implementa expandiendo `semestres_por_carrera`: se agrega el curso a cada
+    especialidad en TODOS los semestres cuyo número coincida (incluyendo tracks de mención,
+    p.ej. sem 10 cubre 10, 10a, 10f…). Así RD1 (CP-SAT, GA, reporter, edición) y el filtro
+    del frontend lo consideran automáticamente. Los cursos de Plan Común sem 1-4 no cambian.
+    """
+    labels_por_carrera: dict[str, set[str]] = {c: set() for c in _ESPECIALIDADES}
+    for cur in cursos.values():
+        for c in _ESPECIALIDADES:
+            labels_por_carrera[c].update(cur.semestres_por_carrera.get(c, set()))
+
+    avisos: list[str] = []
+    for cur in cursos.values():
+        sems_pc = cur.semestres_por_carrera.get("Plan Común")
+        if not sems_pc:
+            continue
+        for sem in sorted(sems_pc):
+            n = _num_semestre(sem)
+            if n < 5:
+                continue
+            añadidos: list[str] = []
+            for c in _ESPECIALIDADES:
+                for lbl in labels_por_carrera[c]:
+                    if _num_semestre(lbl) == n:
+                        cur.semestres_por_carrera.setdefault(c, set()).add(lbl)
+                        añadidos.append(f"{c}:{lbl}")
+            if añadidos:
+                avisos.append(
+                    f"[INFO] {cur.codigo} (Plan Común sem {sem}) → no-topa también con "
+                    f"{', '.join(sorted(añadidos))}"
+                )
+    return avisos
+
+
 def _leer_maestro(
     df: pd.DataFrame,
     cols: dict[str, Optional[str]],
@@ -592,6 +660,11 @@ def _leer_maestro(
         titulo       = _str(_get(row, cols["TITULO"]))
         seccion_id   = _normalizar_seccion_id(_get(row, cols["SECCIONES"]))
         plan_estudio = _str(_get(row, cols["PLAN"])) or "desconocido"
+        # Metadatos para el Excel de salida (formato histórico)
+        area_val     = _str(_get(row, cols["AREA"])) if cols.get("AREA") else ""
+        nrc_val      = _str(_get(row, cols["NRC"])) if cols.get("NRC") else ""
+        conector_val = _str(_get(row, cols["CONECTOR"])) if cols.get("CONECTOR") else ""
+        meta = dict(nrc=nrc_val, area=area_val, plan=plan_estudio, conector=conector_val)
 
         # ── Semestres (regla Plan Común vs especialidad) ───────────────────
         pc = _parse_semestre(_get(row, cols["PC"]))
@@ -634,7 +707,7 @@ def _leer_maestro(
         if rut2:
             advertencias.append(
                 f"[INFO] {codigo}-{seccion_id}: PROFESOR 2 presente ({nombre2}) — "
-                "solo se usa PROF 1 para restricciones en v1"
+                "co-dictante de CLAS: se le aplican RD2 (disponibilidad) y RD3 (unicidad)"
             )
 
         # Registrar todos los profesores de esta fila
@@ -688,6 +761,7 @@ def _leer_maestro(
             sec_id = f"{sec_base}-CLAS"
             if sec_id not in sec_ids_creados:
                 sec_ids_creados.add(sec_id)
+                est = _estructura_bloques("CLAS", clas_h, distribucion)
                 secciones.append(Seccion(
                     id=sec_id,
                     codigo_curso=codigo,
@@ -695,14 +769,22 @@ def _leer_maestro(
                     componente=TipoReunion.CLAS,
                     rut_profesor=rut1,
                     afecta_disponibilidad=bool(rut1),
-                    cantidad_bloques_necesarios=_calcular_bloques_clas(clas_h, distribucion),
-                    duracion_bloque=_duracion_bloque_clas(clas_h, distribucion),
+                    rut_profesor_2=rut2,
+                    cantidad_bloques_necesarios=est["cantidad"],
+                    tipos_bloques_necesarios=est["tipos"],
+                    duracion_bloque=est["duracion"],
+                    distribucion_indefinida=est["indefinida"],
+                    **meta,
                 ))
+                if est["aviso"]:
+                    advertencias.append(_msg_aviso_estructura(sec_id, est["aviso"], clas_h))
 
         if ayud_h > 0:
             sec_id = f"{sec_base}-AYUD"
             if sec_id not in sec_ids_creados:
                 sec_ids_creados.add(sec_id)
+                # AYUD/LABT no usan la columna de distribución (es de la CLAS).
+                est = _estructura_bloques("AYUD", ayud_h, "")
                 secciones.append(Seccion(
                     id=sec_id,
                     codigo_curso=codigo,
@@ -710,9 +792,12 @@ def _leer_maestro(
                     componente=TipoReunion.AYUD,
                     rut_profesor=rut1,           # nominal; la dicta un TA
                     afecta_disponibilidad=False,  # AYUD nunca afecta disponibilidad
-                    cantidad_bloques_necesarios=_calcular_bloques(ayud_h),
-                    duracion_bloque=_duracion_bloque(ayud_h),
+                    cantidad_bloques_necesarios=est["cantidad"],
+                    duracion_bloque=est["duracion"],
+                    **meta,
                 ))
+                if est["aviso"]:
+                    advertencias.append(_msg_aviso_estructura(sec_id, est["aviso"], ayud_h))
 
         if lab_h > 0:
             sec_id = f"{sec_base}-LABT"
@@ -727,6 +812,7 @@ def _leer_maestro(
                     # Guardamos rut1 solo como referencia/display, no como restricción
                     prof_lab       = rut1
                     afecta_lab     = False
+                est = _estructura_bloques("LABT", lab_h, "")
                 secciones.append(Seccion(
                     id=sec_id,
                     codigo_curso=codigo,
@@ -734,9 +820,15 @@ def _leer_maestro(
                     componente=TipoReunion.LABT,
                     rut_profesor=prof_lab,
                     afecta_disponibilidad=afecta_lab,
-                    cantidad_bloques_necesarios=_calcular_bloques(lab_h),
-                    duracion_bloque=_duracion_bloque(lab_h),
+                    cantidad_bloques_necesarios=est["cantidad"],
+                    duracion_bloque=est["duracion"],
+                    **meta,
                 ))
+                if est["aviso"]:
+                    advertencias.append(_msg_aviso_estructura(sec_id, est["aviso"], lab_h))
+
+    # Plan Común sem 5+ debe no-topar con todas las especialidades del mismo semestre.
+    advertencias.extend(_expandir_plan_comun_superior(cursos))
 
     for w in advertencias:
         print(w)

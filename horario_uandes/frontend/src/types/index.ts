@@ -63,16 +63,118 @@ export interface ReporteDetallado {
   violaciones_blandas: ViolacionItem[]
 }
 
+// ── Diagnóstico (cuando no hay horario completo factible) ──────────────────────
+
+export type EstadoSolve = 'FACTIBLE' | 'PARCIAL' | 'INFEASIBLE'
+
+export interface Sugerencia {
+  causa: string                    // "2mas1_sin_par" | "RD2" | "contencion" | ...
+  severidad: 'alta' | 'media'
+  mensaje: string
+  acciones: string[]
+  secciones: string[]
+  profesores: string[]
+  bloques: string[]
+}
+
+export interface DiagnosticoUnidad {
+  carrera: string
+  semestre: string
+  causa_principal: string
+  sugerencias: Sugerencia[]
+}
+
+export interface DiagnosticoResult {
+  unidades: DiagnosticoUnidad[]
+}
+
+export interface DecisionSeccion {
+  sec_id: string
+  codigo: string
+  titulo: string
+  seccion: string
+  profesor: string
+  tipo: 'distribucion' | 'duracion_1h'
+  opciones: string[]        // ["3-juntas","2+1"] | ["1h","2h"]
+  actual: string            // opción vigente ("" si aún no se elige)
+  requerida: boolean        // true = bloquea la programación
+  mensaje: string
+}
+
 export interface SolveResult {
-  metricas: MetricasResult
+  estado: EstadoSolve
+  metricas?: MetricasResult
   secciones: SeccionAsignada[]
   reporte?: ReporteDetallado
+  diagnostico?: DiagnosticoResult
+  decisiones: DecisionSeccion[]
 }
 
 export interface StatusResponse {
   status: SolverStatus
   progress: string
   error: string
+}
+
+// ── Edición manual (click-para-mover) ──────────────────────────────────────────
+
+export interface BloqueValido {
+  bloque: number
+  dia: Dia
+  hora_inicio: string
+  hora_fin: string
+  es_helper: boolean
+  actual: boolean
+  estado: 'valido' | 'conflicto'
+  motivos: string[]
+}
+
+export interface BloquesValidosResponse {
+  sec_id: string
+  indice: number
+  candidatos: BloqueValido[]
+}
+
+export interface ConflictoItem {
+  tipo: string
+  motivo: string
+}
+
+export interface MoverResponse {
+  sec_id: string
+  seccion: SeccionAsignada
+  conflictos: ConflictoItem[]
+}
+
+export interface ConflictoActivo {
+  tipo: string
+  motivo: string
+  secciones: string[]
+}
+
+// ── Persistencia: planificaciones y versiones ─────────────────────────────────
+
+export interface PlanificacionInfo {
+  id: number
+  nombre: string
+  creada: string
+  actualizada: string
+  maestro_nombre: string
+  salas_nombre: string
+  n_versiones: number
+  activa: boolean
+  tiene_horario: boolean
+  estado_horario: string   // FACTIBLE | PARCIAL | INFEASIBLE | ""
+  n_secciones: number
+  n_conflictos: number
+}
+
+export interface VersionInfo {
+  id: number
+  planificacion_id: number
+  nombre: string
+  creada: string
+  es_autosave: boolean
 }
 
 export interface SolveParams {

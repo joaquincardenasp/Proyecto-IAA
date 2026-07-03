@@ -82,7 +82,137 @@ class ReporteDetallado(BaseModel):
     violaciones_blandas: list[ViolacionItem]
 
 
+# ---------------------------------------------------------------------------
+# Diagnóstico (cuando no hay horario completo factible)
+# ---------------------------------------------------------------------------
+
+class SugerenciaItem(BaseModel):
+    causa: str                              # "2mas1_sin_par", "RD2", "contencion", ...
+    severidad: str                          # "alta" | "media"
+    mensaje: str                            # explicación legible
+    acciones: list[str] = Field(default_factory=list)
+    secciones: list[str] = Field(default_factory=list)
+    profesores: list[str] = Field(default_factory=list)
+    bloques: list[str] = Field(default_factory=list)
+
+
+class DiagnosticoUnidadItem(BaseModel):
+    carrera: str
+    semestre: str
+    causa_principal: str
+    sugerencias: list[SugerenciaItem] = Field(default_factory=list)
+
+
+class DiagnosticoResult(BaseModel):
+    unidades: list[DiagnosticoUnidadItem] = Field(default_factory=list)
+
+
+class DecisionSeccion(BaseModel):
+    """Una sección que requiere/admite una decisión estructural del usuario."""
+    sec_id: str
+    codigo: str
+    titulo: str
+    seccion: str
+    profesor: str
+    tipo: str                 # "distribucion" (3h sin definir) | "duracion_1h" (componente de 1h)
+    opciones: list[str]       # ["3-juntas", "2+1"] o ["1h", "2h"]
+    actual: str               # opción vigente ("" si indefinida)
+    requerida: bool           # True = bloquea la programación; False = ajuste opcional
+    mensaje: str
+
+
 class SolveResult(BaseModel):
-    metricas: MetricasResult
-    secciones: list[SeccionAsignada]
+    # FACTIBLE (horario completo) | PARCIAL (subconjunto + diagnóstico) | INFEASIBLE (solo diagnóstico)
+    estado: str = "FACTIBLE"
+    metricas: Optional[MetricasResult] = None
+    secciones: list[SeccionAsignada] = Field(default_factory=list)
     reporte: Optional[ReporteDetallado] = None
+    diagnostico: Optional[DiagnosticoResult] = None
+    # Secciones que requieren decisión (distribución 3h) o admiten un ajuste (componente 1h).
+    decisiones: list[DecisionSeccion] = Field(default_factory=list)
+
+
+class DecisionRequest(BaseModel):
+    sec_id: str
+    opcion: str               # "3-juntas" | "2+1" (distribución) o "1h" | "2h" (duración)
+
+
+# ---------------------------------------------------------------------------
+# Persistencia: planificaciones y versiones
+# ---------------------------------------------------------------------------
+
+class PlanificacionInfo(BaseModel):
+    id: int
+    nombre: str
+    creada: str
+    actualizada: str
+    maestro_nombre: str = ""
+    salas_nombre: str = ""
+    n_versiones: int = 0
+    activa: bool = False
+    # Estado derivado del autoguardado (para las tarjetas del inicio)
+    tiene_horario: bool = False
+    estado_horario: str = ""          # FACTIBLE | PARCIAL | INFEASIBLE | ""
+    n_secciones: int = 0
+    n_conflictos: int = 0             # violaciones duras del reporte
+
+
+class VersionInfo(BaseModel):
+    id: int
+    planificacion_id: int
+    nombre: str
+    creada: str
+    es_autosave: bool = False
+
+
+class GuardarVersionRequest(BaseModel):
+    nombre: str
+
+
+# ---------------------------------------------------------------------------
+# Edición manual del horario (click-para-mover)
+# ---------------------------------------------------------------------------
+
+class BloqueValido(BaseModel):
+    bloque: int                 # índice del bloque en el catálogo
+    dia: str
+    hora_inicio: str
+    hora_fin: str
+    es_helper: bool
+    actual: bool                # True si es el bloque que ocupa hoy la sección
+    estado: str                 # "valido" | "conflicto"
+    motivos: list[str] = Field(default_factory=list)
+
+
+class BloquesValidosRequest(BaseModel):
+    sec_id: str
+    indice: int = 0             # cuál de los bloques de la sección se está moviendo
+
+
+class BloquesValidosResponse(BaseModel):
+    sec_id: str
+    indice: int
+    candidatos: list[BloqueValido] = Field(default_factory=list)
+
+
+class ConflictoItem(BaseModel):
+    tipo: str                   # "RD1" | "RD2" | ... | "intra" | "NRC"
+    motivo: str
+
+
+class ConflictoActivo(BaseModel):
+    tipo: str                   # "RD1" | "RD3" | ... | "intra" | "NRC"
+    motivo: str
+    secciones: list[str]        # ids de las secciones involucradas
+
+
+class MoverRequest(BaseModel):
+    sec_id: str
+    indice: int
+    destino: int                # índice del bloque destino en el catálogo
+
+
+class MoverResponse(BaseModel):
+    sec_id: str
+    seccion: SeccionAsignada    # sección con su nueva asignación
+    conflictos: list[ConflictoItem] = Field(default_factory=list)

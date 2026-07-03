@@ -13,19 +13,28 @@ Flujo:
 from __future__ import annotations
 
 import asyncio
+import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from ..core.blocks import TODOS_BLOQUES
 from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
-from ..core.parser import cargar_datos
+from ..core.parser import cargar_datos, _estructura_bloques
+from ..core.diagnostico import (
+    diagnosticar, Diagnostico, DiagnosticoUnidad, Sugerencia,
+)
+from ..core.edicion import aplicar_movimiento, bloques_validos, validar_asignacion
+from ..db import models_db as dbm
+from ..db.database import SessionLocal
 from ..core.reporter import generar_reporte_detallado
-from ..core.solver_cpsat import resolver
+from ..core.solver_cpsat import resolver_por_partes
 from ..core.solver_ga import (
     PESOS,
     calcular_fitness,
@@ -35,7 +44,20 @@ from ..core.solver_ga import (
 )
 from ..schemas.solve import (
     BloqueAsignado,
+    BloquesValidosRequest,
+    BloquesValidosResponse,
+    BloqueValido,
+    ConflictoActivo,
+    ConflictoItem,
+    DecisionRequest,
+    DecisionSeccion,
+    DiagnosticoResult,
+    DiagnosticoUnidadItem,
+    GuardarVersionRequest,
     MetricasResult,
+    MoverRequest,
+    MoverResponse,
+    PlanificacionInfo,
     ReporteDetallado,
     ResumenReporte,
     SeccionAsignada,
@@ -43,6 +65,8 @@ from ..schemas.solve import (
     SolveRequest,
     SolveResult,
     StatusResponse,
+    SugerenciaItem,
+    VersionInfo,
     ViolacionItem,
 )
 
@@ -56,14 +80,20 @@ OUTPUTS_DIR = Path(__file__).parent.parent.parent / "outputs"
 # ---------------------------------------------------------------------------
 
 _state: dict = {
-    "status":       "idle",   # idle | running | ready | error
-    "progress":     "",
-    "error":        "",
-    "asignaciones": None,     # dict[str, list[int]]
-    "metricas":     None,     # dict
-    "reporte":      None,     # dict (salida de generar_reporte_detallado)
-    "excel_bytes":  None,     # bytes
-    "datos":        None,     # DatosProblema
+    "status":                  "idle",   # idle | running | ready | error
+    "progress":                "",
+    "error":                   "",
+    "estado":                  "",       # FACTIBLE | PARCIAL | INFEASIBLE (resultado del solve)
+    "asignaciones":            None,     # dict[str, list[int]]
+    "metricas":                None,     # dict
+    "reporte":                 None,     # dict (salida de generar_reporte_detallado)
+    "diagnostico":             None,     # Diagnostico (dataclass) o None
+    "excel_bytes":             None,     # bytes
+    "datos":                   None,     # DatosProblema
+    # Decisiones del usuario sobre estructura de bloques (persisten entre regeneraciones):
+    "overrides":               {"distribucion": {}, "duracion": {}},
+    "decisiones_cand":         [],       # candidatos a decisión (del parse fresco)
+    "planificacion_id":        None,     # planificación activa (para autosave/persistencia)
 }
 _lock     = asyncio.Lock()
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -77,87 +107,181 @@ def _set_progress(msg: str) -> None:
     _state["progress"] = msg
 
 
+# ---------------------------------------------------------------------------
+# Decisiones de estructura de bloques (distribución 3h / componente 1h)
+# ---------------------------------------------------------------------------
+
+def _candidatos_decision(datos: DatosProblema) -> list[dict]:
+    """
+    Secciones que requieren/admiten una decisión estructural, tomadas del parse FRESCO
+    (antes de aplicar overrides): CLAS de 3h sin distribución (requerida) y componentes de
+    1h (ajuste opcional a 2h).
+    """
+    cand: list[dict] = []
+    for s in datos.secciones:
+        curso = datos.cursos.get(s.codigo_curso)
+        info = dict(
+            sec_id=s.id, codigo=s.codigo_curso,
+            titulo=curso.titulo if curso else "", seccion=s.seccion,
+            profesor=(datos.profesores.get(s.rut_profesor).nombre
+                      if datos.profesores.get(s.rut_profesor) else s.rut_profesor) or "",
+        )
+        if s.distribucion_indefinida:
+            cand.append({**info, "tipo": "distribucion"})
+        elif s.duracion_bloque == "1h":
+            cand.append({**info, "tipo": "duracion_1h"})
+    return cand
+
+
+def _build_decisiones(candidatos: list[dict], overrides: dict) -> list[DecisionSeccion]:
+    """Arma la lista de DecisionSeccion combinando los candidatos con los overrides vigentes."""
+    ov_dist = overrides.get("distribucion", {})
+    ov_dur = overrides.get("duracion", {})
+    out: list[DecisionSeccion] = []
+    for c in candidatos:
+        if c["tipo"] == "distribucion":
+            out.append(DecisionSeccion(
+                **{k: c[k] for k in ("sec_id", "codigo", "titulo", "seccion", "profesor")},
+                tipo="distribucion", opciones=["3-juntas", "2+1"],
+                actual=ov_dist.get(c["sec_id"], ""), requerida=True,
+                mensaje=("Clase de 3h sin distribución definida. Elige cómo dictarla: "
+                         "'3-juntas' (un bloque de 3h) o '2+1' (un bloque de 2h + uno de 1h). "
+                         "Hasta entonces no se programa."),
+            ))
+        else:  # duracion_1h
+            out.append(DecisionSeccion(
+                **{k: c[k] for k in ("sec_id", "codigo", "titulo", "seccion", "profesor")},
+                tipo="duracion_1h", opciones=["1h", "2h"],
+                actual=ov_dur.get(c["sec_id"], "1h"), requerida=False,
+                mensaje=("Componente de 1 hora (inusual). Por defecto usa un bloque de 1h; "
+                         "puedes cambiarlo a un bloque de 2h si corresponde."),
+            ))
+    return out
+
+
+def _aplicar_overrides(datos: DatosProblema, overrides: dict) -> None:
+    """Aplica las decisiones del usuario sobre las secciones (in-place) antes de resolver."""
+    sec_by_id = {s.id: s for s in datos.secciones}
+    for sid, opcion in overrides.get("distribucion", {}).items():
+        s = sec_by_id.get(sid)
+        if not s or opcion not in ("3-juntas", "2+1"):
+            continue
+        est = _estructura_bloques("CLAS", 3, opcion)
+        s.cantidad_bloques_necesarios = est["cantidad"]
+        s.tipos_bloques_necesarios = est["tipos"]
+        s.duracion_bloque = est["duracion"]
+        s.distribucion_indefinida = est["indefinida"]
+    for sid, dur in overrides.get("duracion", {}).items():
+        s = sec_by_id.get(sid)
+        if not s or dur not in ("1h", "2h"):
+            continue
+        s.duracion_bloque = dur
+        s.tipos_bloques_necesarios = []
+
+
 def _solve_sync(req: SolveRequest) -> None:
     try:
         _set_progress("Cargando datos…")
         datos = cargar_datos(INPUTS_DIR)
+        # Candidatos a decisión (del parse fresco, antes de aplicar overrides) y luego
+        # aplicar las decisiones ya tomadas por el usuario.
+        _state["decisiones_cand"] = _candidatos_decision(datos)
+        _aplicar_overrides(datos, _state["overrides"])
         _state["datos"] = datos
 
-        _set_progress("Ejecutando CP-SAT…")
-        resultado_cpsat = resolver(
+        _set_progress("Generando el mejor horario posible…")
+        # Sin relajación automática. resolver_por_partes entrega el horario COMPLETO si
+        # existe (FACTIBLE), o el subconjunto factible + unidades bloqueadas (PARCIAL), o
+        # nada colocable (INFEASIBLE). En ningún caso viola restricciones duras.
+        resultado = resolver_por_partes(
             datos,
             carreras=req.carreras,
             tiempo_limite_s=req.tiempo_limite_cpsat,
         )
-        if resultado_cpsat.estado not in ("OPTIMAL", "FEASIBLE"):
-            raise RuntimeError(f"CP-SAT no encontró solución: {resultado_cpsat.estado}")
+        asignaciones_cpsat = resultado.asignaciones
 
-        _set_progress(f"CP-SAT: {resultado_cpsat.estado}. Ejecutando GA…")
-        resultado_ga = ejecutar_ga(
-            datos,
-            resultado_cpsat.asignaciones,
-            n_generaciones=req.n_generaciones,
-            pop_size=req.pop_size,
-            seed=req.seed,
-        )
+        # Diagnóstico accionable de las unidades que no se pudieron colocar.
+        diagnostico = None
+        if resultado.bloqueadas:
+            _set_progress("Diagnosticando conflictos…")
+            diagnostico = diagnosticar(datos, resultado, req.carreras)
 
-        asignaciones = resultado_ga.asignaciones
+        metricas_api = None
+        reporte_raw = None
+        excel_bytes = None
+        asignaciones: dict = {}
 
-        _set_progress("Calculando métricas y reporte…")
-        ctx           = construir_contexto(datos, resultado_cpsat.asignaciones)
-        fitness_cpsat = calcular_fitness(encode(resultado_cpsat.asignaciones, ctx), ctx)[0]
-        fitness_ga    = resultado_ga.fitness_final
-        mejora_pct    = (
-            (fitness_cpsat - fitness_ga) / fitness_cpsat * 100
-            if fitness_cpsat > 0 else 0.0
-        )
-        n_bloques_totales = sum(len(b) for b in asignaciones.values())
-
-        reporte_raw = generar_reporte_detallado(datos, asignaciones)
-
-        # Desglose para Excel (usa penalizacion_por_rb del reporte)
-        pen_rb = reporte_raw["resumen"]["penalizacion_por_rb"]
-        metricas_dict = {
-            "fitness_cpsat": fitness_cpsat,
-            "fitness_ga":    fitness_ga,
-            "mejora_pct":    mejora_pct,
-            "rb_detalle": {
-                f"RB{k+1} (peso {v})": pen_rb.get(f"RB{k+1}", 0)
-                for k, v in enumerate(PESOS.values())
-            },
-        }
-        metricas_api = {
-            "fitness_cpsat":     fitness_cpsat,
-            "fitness_ga":        fitness_ga,
-            "mejora_pct":        mejora_pct,
-            "n_secciones":       len(asignaciones),
-            "n_bloques_totales": n_bloques_totales,
-            "estado_cpsat":      resultado_cpsat.estado,
-        }
-
-        _set_progress("Generando Excel…")
-        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            excel_bytes = exportar_horario(
-                datos, asignaciones,
-                output_path=OUTPUTS_DIR / "horario_generado.xlsx",
-                metricas=metricas_dict,
-                reporte=reporte_raw,
+        # Solo optimizamos/exportamos si hay algo colocado (FACTIBLE o PARCIAL).
+        if asignaciones_cpsat:
+            _set_progress("Optimizando restricciones blandas (GA)…")
+            resultado_ga = ejecutar_ga(
+                datos,
+                asignaciones_cpsat,
+                n_generaciones=req.n_generaciones,
+                pop_size=req.pop_size,
+                seed=req.seed,
             )
-        except PermissionError:
-            excel_bytes = exportar_horario(
-                datos, asignaciones,
-                metricas=metricas_dict,
-                reporte=reporte_raw,
-            )
+            asignaciones = resultado_ga.asignaciones
 
+            _set_progress("Calculando métricas y reporte…")
+            ctx           = construir_contexto(datos, asignaciones_cpsat)
+            fitness_cpsat = calcular_fitness(encode(asignaciones_cpsat, ctx), ctx)[0]
+            fitness_ga    = resultado_ga.fitness_final
+            mejora_pct    = (
+                (fitness_cpsat - fitness_ga) / fitness_cpsat * 100
+                if fitness_cpsat > 0 else 0.0
+            )
+            n_bloques_totales = sum(len(b) for b in asignaciones.values())
+
+            reporte_raw = generar_reporte_detallado(datos, asignaciones)
+
+            pen_rb = reporte_raw["resumen"]["penalizacion_por_rb"]
+            metricas_dict = {
+                "fitness_cpsat": fitness_cpsat,
+                "fitness_ga":    fitness_ga,
+                "mejora_pct":    mejora_pct,
+                "rb_detalle": {
+                    f"RB{k+1} (peso {v})": pen_rb.get(f"RB{k+1}", 0)
+                    for k, v in enumerate(PESOS.values())
+                },
+            }
+            metricas_api = {
+                "fitness_cpsat":          fitness_cpsat,
+                "fitness_ga":             fitness_ga,
+                "mejora_pct":             mejora_pct,
+                "n_secciones":            len(asignaciones),
+                "n_bloques_totales":      n_bloques_totales,
+                # Factibilidad del horario COLOCADO (siempre respeta las duras). El estado
+                # global FACTIBLE/PARCIAL/INFEASIBLE va en SolveResult.estado, no aquí.
+                "estado_cpsat":           "FEASIBLE",
+            }
+
+            _set_progress("Generando Excel…")
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                excel_bytes = exportar_horario(
+                    datos, asignaciones,
+                    output_path=OUTPUTS_DIR / "horario_generado.xlsx",
+                    metricas=metricas_dict,
+                    reporte=reporte_raw,
+                )
+            except PermissionError:
+                excel_bytes = exportar_horario(
+                    datos, asignaciones,
+                    metricas=metricas_dict,
+                    reporte=reporte_raw,
+                )
+
+        _state["estado"]       = resultado.estado
         _state["asignaciones"] = asignaciones
         _state["metricas"]     = metricas_api
         _state["reporte"]      = reporte_raw
+        _state["diagnostico"]  = diagnostico
         _state["excel_bytes"]  = excel_bytes
         _state["status"]       = "ready"
         _state["progress"]     = "Completado"
         _state["error"]        = ""
+        _autosave()            # persistir el estado recién generado
 
     except Exception as exc:
         _state["status"]   = "error"
@@ -243,14 +367,35 @@ def _build_reporte(reporte_raw: dict) -> ReporteDetallado:
     )
 
 
+def _build_diagnostico(diag) -> DiagnosticoResult:
+    """Convierte el dataclass Diagnostico (core) al schema Pydantic de la API."""
+    return DiagnosticoResult(
+        unidades=[
+            DiagnosticoUnidadItem(
+                carrera=u.carrera,
+                semestre=u.semestre,
+                causa_principal=u.causa_principal,
+                sugerencias=[
+                    SugerenciaItem(
+                        causa=s.causa,
+                        severidad=s.severidad,
+                        mensaje=s.mensaje,
+                        acciones=s.acciones,
+                        secciones=s.secciones,
+                        profesores=s.profesores,
+                        bloques=s.bloques,
+                    )
+                    for s in u.sugerencias
+                ],
+            )
+            for u in diag.unidades
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-
-@router.get("/health")
-def health():
-    return {"status": "ok"}
-
 
 @router.post("/upload")
 async def upload_files(files: list[UploadFile] = File(...)):
@@ -259,10 +404,9 @@ async def upload_files(files: list[UploadFile] = File(...)):
         INPUTS_DIR.mkdir(parents=True, exist_ok=True)
         saved = []
         for f in files:
-            # Usar solo el nombre base para evitar rutas relativas/absolutas peligrosas
             nombre = Path(f.filename or "").name
             if not nombre:
-                continue  # ignorar entradas sin nombre de archivo
+                continue
             contenido = await f.read()
             try:
                 (INPUTS_DIR / nombre).write_bytes(contenido)
@@ -288,17 +432,24 @@ async def upload_files(files: list[UploadFile] = File(...)):
 
 @router.post("/solve", status_code=202)
 async def solve(req: SolveRequest, background_tasks: BackgroundTasks):
-    """Lanza el solver en background. Devuelve 409 si ya está corriendo."""
+    """Lanza el solver en background. Requiere una planificación activa. 409 si ya corre."""
+    if not _state.get("planificacion_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Crea o activa una planificación antes de generar el horario.",
+        )
     async with _lock:
         if _state["status"] == "running":
             raise HTTPException(status_code=409, detail="Solver ya está en ejecución")
-        _state["status"]       = "running"
-        _state["progress"]     = "Iniciando…"
-        _state["error"]        = ""
-        _state["asignaciones"] = None
-        _state["metricas"]     = None
-        _state["reporte"]      = None
-        _state["excel_bytes"]  = None
+        _state["status"]                 = "running"
+        _state["progress"]               = "Iniciando…"
+        _state["error"]                  = ""
+        _state["estado"]                 = ""
+        _state["asignaciones"]           = None
+        _state["metricas"]               = None
+        _state["reporte"]                = None
+        _state["diagnostico"]            = None
+        _state["excel_bytes"]            = None
 
     background_tasks.add_task(_solve_background, req)
     return {"detail": "Solver iniciado"}
@@ -315,24 +466,55 @@ def get_status():
 
 @router.get("/results", response_model=SolveResult)
 def get_results():
-    """Devuelve secciones, métricas y reporte de violaciones. 404 si no está listo."""
+    """
+    Devuelve el resultado del solve. Según `estado`:
+      FACTIBLE   — secciones + métricas + reporte (horario completo).
+      PARCIAL    — secciones + métricas + reporte del subconjunto colocado, más diagnóstico.
+      INFEASIBLE — sin horario; solo diagnóstico.
+    404 si aún no está listo.
+    """
     if _state["status"] != "ready":
         raise HTTPException(
             status_code=404,
             detail=f"Resultados no disponibles (status={_state['status']})",
         )
-    secciones = _build_secciones(_state["datos"], _state["asignaciones"])
-    metricas_raw = _state["metricas"]
-    metricas = MetricasResult(
-        fitness_cpsat=metricas_raw["fitness_cpsat"],
-        fitness_ga=metricas_raw["fitness_ga"],
-        mejora_pct=metricas_raw["mejora_pct"],
-        n_secciones=metricas_raw["n_secciones"],
-        n_bloques_totales=metricas_raw["n_bloques_totales"],
-        estado_cpsat=metricas_raw["estado_cpsat"],
+    secciones = (
+        _build_secciones(_state["datos"], _state["asignaciones"])
+        if _state["asignaciones"] else []
     )
+    metricas_raw = _state["metricas"]
+    metricas = None
+    if metricas_raw:
+        metricas = MetricasResult(
+            fitness_cpsat=metricas_raw["fitness_cpsat"],
+            fitness_ga=metricas_raw["fitness_ga"],
+            mejora_pct=metricas_raw["mejora_pct"],
+            n_secciones=metricas_raw["n_secciones"],
+            n_bloques_totales=metricas_raw["n_bloques_totales"],
+            estado_cpsat=metricas_raw["estado_cpsat"],
+        )
     reporte = _build_reporte(_state["reporte"]) if _state["reporte"] else None
-    return SolveResult(metricas=metricas, secciones=secciones, reporte=reporte)
+    diagnostico = _build_diagnostico(_state["diagnostico"]) if _state["diagnostico"] else None
+    decisiones = _build_decisiones(_state["decisiones_cand"], _state["overrides"])
+    return SolveResult(
+        estado=_state["estado"] or "FACTIBLE",
+        metricas=metricas,
+        secciones=secciones,
+        reporte=reporte,
+        diagnostico=diagnostico,
+        decisiones=decisiones,
+    )
+
+
+@router.get("/diagnostico", response_model=DiagnosticoResult)
+def get_diagnostico():
+    """Devuelve el diagnóstico de conflictos del último solve. 404 si no hay."""
+    if _state["status"] != "ready" or _state["diagnostico"] is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay diagnóstico disponible (el horario es factible o aún no se resolvió).",
+        )
+    return _build_diagnostico(_state["diagnostico"])
 
 
 @router.get("/report", response_model=ReporteDetallado)
@@ -344,6 +526,405 @@ def get_report():
             detail=f"Reporte no disponible (status={_state['status']})",
         )
     return _build_reporte(_state["reporte"])
+
+
+@router.post("/editar/bloques-validos", response_model=BloquesValidosResponse)
+def editar_bloques_validos(req: BloquesValidosRequest):
+    """
+    Para una sección del horario actual, devuelve los bloques candidatos del hueco `indice`
+    marcados como 'valido' (verde) o 'conflicto' (rojo, con motivos). No modifica el estado.
+    """
+    if _state["status"] != "ready" or not _state["asignaciones"]:
+        raise HTTPException(status_code=404, detail="No hay un horario cargado para editar.")
+    if req.sec_id not in _state["asignaciones"]:
+        raise HTTPException(status_code=404, detail=f"Sección {req.sec_id} no está en el horario.")
+
+    candidatos = bloques_validos(
+        _state["datos"], _state["asignaciones"], req.sec_id, req.indice
+    )
+    return BloquesValidosResponse(
+        sec_id=req.sec_id,
+        indice=req.indice,
+        candidatos=[BloqueValido(**c) for c in candidatos],
+    )
+
+
+@router.post("/editar/mover", response_model=MoverResponse)
+def editar_mover(req: MoverRequest):
+    """
+    Mueve el hueco `indice` de una sección al bloque `destino` y revalida. Aplica el cambio
+    (el sistema informa los conflictos resultantes, no bloquea) y regenera reporte y Excel.
+    """
+    if _state["status"] != "ready" or not _state["asignaciones"]:
+        raise HTTPException(status_code=404, detail="No hay un horario cargado para editar.")
+    if req.sec_id not in _state["asignaciones"]:
+        raise HTTPException(status_code=404, detail=f"Sección {req.sec_id} no está en el horario.")
+
+    datos = _state["datos"]
+    try:
+        nueva, conflictos = aplicar_movimiento(
+            datos, _state["asignaciones"], req.sec_id, req.indice, req.destino
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Persistir el cambio y regenerar reporte + Excel para mantener todo consistente.
+    _state["asignaciones"] = nueva
+    _state["reporte"] = generar_reporte_detallado(datos, nueva)
+    try:
+        _state["excel_bytes"] = exportar_horario(
+            datos, nueva,
+            output_path=OUTPUTS_DIR / "horario_generado.xlsx",
+            reporte=_state["reporte"],
+        )
+    except PermissionError:
+        _state["excel_bytes"] = exportar_horario(datos, nueva, reporte=_state["reporte"])
+
+    _autosave()  # persistir la edición manual
+    seccion = _build_secciones(datos, {req.sec_id: nueva[req.sec_id]})[0]
+    return MoverResponse(
+        sec_id=req.sec_id,
+        seccion=seccion,
+        conflictos=[ConflictoItem(**c) for c in conflictos],
+    )
+
+
+@router.get("/conflictos", response_model=list[ConflictoActivo])
+def get_conflictos():
+    """
+    Lista todos los conflictos duros vigentes en el horario actual (deduplicados). Base del
+    panel de 'conflictos activos': se refresca tras cada edición para que el usuario no pierda
+    de vista ningún tope que haya dejado. Lista vacía si no hay horario o no hay conflictos.
+    """
+    if _state["status"] != "ready" or not _state["asignaciones"]:
+        return []
+    conflictos = validar_asignacion(_state["datos"], _state["asignaciones"])
+    return [ConflictoActivo(**c) for c in conflictos]
+
+
+@router.post("/decisiones/distribucion", response_model=list[DecisionSeccion])
+def set_distribucion(req: DecisionRequest):
+    """
+    Registra la distribución elegida para una CLAS de 3h sin definir ("3-juntas" | "2+1").
+    No re-resuelve: el cambio se aplica al regenerar el horario (POST /solve). Devuelve la
+    lista de decisiones actualizada.
+    """
+    if req.opcion not in ("3-juntas", "2+1"):
+        raise HTTPException(status_code=400, detail="Opción inválida (usa '3-juntas' o '2+1').")
+    _state["overrides"]["distribucion"][req.sec_id] = req.opcion
+    _autosave()
+    return _build_decisiones(_state["decisiones_cand"], _state["overrides"])
+
+
+@router.post("/decisiones/duracion", response_model=list[DecisionSeccion])
+def set_duracion(req: DecisionRequest):
+    """
+    Registra la duración elegida para un componente de 1h ("1h" | "2h"). No re-resuelve;
+    se aplica al regenerar (POST /solve). Devuelve la lista de decisiones actualizada.
+    """
+    if req.opcion not in ("1h", "2h"):
+        raise HTTPException(status_code=400, detail="Opción inválida (usa '1h' o '2h').")
+    _state["overrides"]["duracion"][req.sec_id] = req.opcion
+    _autosave()
+    return _build_decisiones(_state["decisiones_cand"], _state["overrides"])
+
+
+# ---------------------------------------------------------------------------
+# Persistencia — planificaciones y versiones (SQLAlchemy)
+# ---------------------------------------------------------------------------
+
+def _serializar_estado() -> str:
+    """Serializa el estado actual del horario a JSON (para guardar una versión)."""
+    diag = _state["diagnostico"]
+    return json.dumps({
+        "estado":          _state["estado"],
+        "asignaciones":    _state["asignaciones"] or {},
+        "metricas":        _state["metricas"],
+        "reporte":         _state["reporte"],
+        "diagnostico":     asdict(diag) if diag else None,
+        "overrides":       _state["overrides"],
+        "decisiones_cand": _state["decisiones_cand"],
+    })
+
+
+def _diag_from_dict(d: dict) -> Diagnostico:
+    return Diagnostico(unidades=[
+        DiagnosticoUnidad(
+            carrera=u["carrera"], semestre=u["semestre"],
+            causa_principal=u["causa_principal"],
+            sugerencias=[Sugerencia(**s) for s in u["sugerencias"]],
+        )
+        for u in d.get("unidades", [])
+    ])
+
+
+def _restaurar_estado(estado_json: str, datos: DatosProblema) -> None:
+    """Restaura el estado del horario desde el JSON de una versión + los datos re-parseados."""
+    d = json.loads(estado_json) if estado_json else {}
+    # Candidatos a decisión del parse fresco, ANTES de aplicar overrides.
+    _state["decisiones_cand"] = _candidatos_decision(datos)
+    _state["overrides"]       = d.get("overrides") or {"distribucion": {}, "duracion": {}}
+    # CLAVE: re-aplicar las decisiones guardadas a los datos re-parseados, para que la
+    # estructura de las secciones (2+1, duración) coincida con las asignaciones guardadas.
+    _aplicar_overrides(datos, _state["overrides"])
+    _state["datos"]           = datos
+    _state["estado"]          = d.get("estado", "")
+    _state["asignaciones"]    = d.get("asignaciones") or {}
+    _state["metricas"]        = d.get("metricas")
+    _state["reporte"]         = d.get("reporte")
+    _state["diagnostico"]     = _diag_from_dict(d["diagnostico"]) if d.get("diagnostico") else None
+    _state["excel_bytes"] = (
+        exportar_horario(datos, _state["asignaciones"], reporte=_state["reporte"])
+        if _state["asignaciones"] else None
+    )
+    _state["status"] = "ready"
+    _state["progress"] = "Cargado"
+    _state["error"] = ""
+
+
+def _escribir_inputs(pl: "dbm.Planificacion") -> None:
+    """Escribe los blobs de la planificación en inputs/ (top-level) para poder parsear."""
+    INPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Remover solo Maestros previos (cargar_datos hace glob de Maestro*.xlsx) para evitar
+    # ambigüedad; NO se tocan catálogos u otros archivos del directorio.
+    for f in list(INPUTS_DIR.glob("[Mm]aestro*.xlsx")):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    if pl.maestro_bytes:
+        (INPUTS_DIR / (pl.maestro_nombre or "Maestro.xlsx")).write_bytes(pl.maestro_bytes)
+    if pl.salas_bytes:
+        (INPUTS_DIR / (pl.salas_nombre or "SALAS_ESPECIALES_ING.xlsx")).write_bytes(pl.salas_bytes)
+
+
+def _autosave() -> None:
+    """Guarda (upsert) el estado actual como versión de autoguardado de la planificación activa."""
+    pid = _state.get("planificacion_id")
+    if not pid or _state["status"] != "ready":
+        return
+    try:
+        with SessionLocal() as db:
+            pl = db.get(dbm.Planificacion, pid)
+            if not pl:
+                return
+            auto = next((v for v in pl.versiones if v.es_autosave), None)
+            if auto is None:
+                auto = dbm.Version(planificacion_id=pid, nombre="(autoguardado)", es_autosave=True)
+                db.add(auto)
+            auto.estado_json = _serializar_estado()
+            auto.creada = datetime.utcnow()
+            pl.actualizada = datetime.utcnow()
+            db.commit()
+    except Exception:
+        traceback.print_exc()
+
+
+def _pl_info(pl: "dbm.Planificacion") -> PlanificacionInfo:
+    # Estado derivado del autoguardado (barato: solo parsea el JSON ya guardado).
+    tiene, estado_h, n_sec, n_conf = False, "", 0, 0
+    auto = next((v for v in pl.versiones if v.es_autosave), None)
+    if auto and auto.estado_json:
+        try:
+            d = json.loads(auto.estado_json)
+            asig = d.get("asignaciones") or {}
+            n_sec = len(asig)
+            tiene = n_sec > 0
+            estado_h = d.get("estado") or ""
+            n_conf = ((d.get("reporte") or {}).get("resumen") or {}).get("total_duras", 0)
+        except Exception:
+            pass
+    return PlanificacionInfo(
+        id=pl.id, nombre=pl.nombre,
+        creada=pl.creada.isoformat() if pl.creada else "",
+        actualizada=pl.actualizada.isoformat() if pl.actualizada else "",
+        maestro_nombre=pl.maestro_nombre or "", salas_nombre=pl.salas_nombre or "",
+        n_versiones=sum(1 for v in pl.versiones if not v.es_autosave),
+        activa=(pl.id == _state.get("planificacion_id")),
+        tiene_horario=tiene, estado_horario=estado_h, n_secciones=n_sec, n_conflictos=n_conf,
+    )
+
+
+def _validar_archivos(maestro_bytes: bytes, salas_bytes: bytes) -> None:
+    """Valida que los archivos subidos tengan el formato esperado. Lanza ValueError si no."""
+    import io
+    import pandas as pd
+    from ..core.parser import _mapear_columnas
+
+    # ── Maestro ──────────────────────────────────────────────────────────────
+    try:
+        xl = pd.ExcelFile(io.BytesIO(maestro_bytes))
+    except Exception:
+        raise ValueError("El archivo Maestro no es un Excel (.xlsx) válido.")
+    hoja_m = next((h for h in xl.sheet_names if h.strip().upper() == "MAESTRO"), None)
+    if not hoja_m:
+        raise ValueError("El Maestro debe contener una hoja llamada 'MAESTRO'. "
+                         "¿Seguro que subiste el archivo correcto?")
+    try:
+        df = xl.parse(hoja_m, nrows=5)
+    except Exception:
+        raise ValueError("No se pudo leer la hoja 'MAESTRO' del archivo.")
+    cols = _mapear_columnas(df)
+    faltan = [k for k in ("MANDANTE", "CODIGO", "SECCIONES") if not cols.get(k)]
+    if faltan:
+        etiquetas = {"MANDANTE": "CURSO MANDANTE", "CODIGO": "CODIGO", "SECCIONES": "SECCIONES"}
+        raise ValueError("El Maestro no tiene las columnas requeridas: "
+                         f"{', '.join(etiquetas[k] for k in faltan)}.")
+
+    # ── Salas especiales ─────────────────────────────────────────────────────
+    try:
+        xls = pd.ExcelFile(io.BytesIO(salas_bytes))
+    except Exception:
+        raise ValueError("El archivo de salas especiales no es un Excel (.xlsx) válido.")
+    hojas_s = {h.strip().upper() for h in xls.sheet_names}
+    if "BBDD" not in hojas_s and "SALAS ESPECIALES" not in hojas_s:
+        raise ValueError("El archivo de salas debe contener la hoja 'BBDD' "
+                         "(o 'SALAS ESPECIALES'). ¿Subiste el archivo correcto?")
+
+
+@router.post("/planificaciones", response_model=PlanificacionInfo)
+async def crear_planificacion(
+    nombre: str = Form(...),
+    maestro: UploadFile = File(...),
+    salas: UploadFile = File(...),
+):
+    """Crea una planificación con sus archivos de entrada (blobs) y la deja activa."""
+    maestro_bytes = await maestro.read()
+    salas_bytes = await salas.read()
+    try:
+        _validar_archivos(maestro_bytes, salas_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    with SessionLocal() as db:
+        pl = dbm.Planificacion(
+            nombre=nombre,
+            maestro_nombre=Path(maestro.filename or "Maestro.xlsx").name,
+            maestro_bytes=maestro_bytes,
+            salas_nombre=Path(salas.filename or "SALAS.xlsx").name,
+            salas_bytes=salas_bytes,
+        )
+        db.add(pl)
+        db.commit()
+        db.refresh(pl)
+        _escribir_inputs(pl)
+        _state["planificacion_id"] = pl.id
+        # Estado limpio hasta que se genere el horario
+        for k in ("estado", "asignaciones", "metricas", "reporte", "diagnostico",
+                  "excel_bytes", "datos", "decisiones_cand"):
+            _state[k] = None if k in ("asignaciones", "metricas", "reporte", "diagnostico",
+                                      "excel_bytes", "datos") else _state[k]
+        _state["estado"] = ""
+        _state["decisiones_cand"] = []
+        _state["overrides"] = {"distribucion": {}, "duracion": {}}
+        _state["status"] = "idle"
+        return _pl_info(pl)
+
+
+@router.get("/planificaciones", response_model=list[PlanificacionInfo])
+def listar_planificaciones():
+    with SessionLocal() as db:
+        pls = db.query(dbm.Planificacion).order_by(dbm.Planificacion.actualizada.desc()).all()
+        return [_pl_info(pl) for pl in pls]
+
+
+@router.post("/planificaciones/{pid}/activar")
+def activar_planificacion(pid: int):
+    """Activa una planificación: escribe sus archivos, re-parsea y restaura su autoguardado."""
+    with SessionLocal() as db:
+        pl = db.get(dbm.Planificacion, pid)
+        if not pl:
+            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        _escribir_inputs(pl)
+        _state["planificacion_id"] = pl.id
+        try:
+            datos = cargar_datos(INPUTS_DIR)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Error al leer los archivos: {exc}")
+        auto = next((v for v in pl.versiones if v.es_autosave), None)
+        if auto and auto.estado_json:
+            _restaurar_estado(auto.estado_json, datos)
+        else:
+            _state["datos"] = datos
+            _state["estado"] = ""
+            for k in ("asignaciones", "metricas", "reporte", "diagnostico", "excel_bytes"):
+                _state[k] = None
+            _state["status"] = "idle"
+        return {"detail": "Planificación activada", "restaurada": bool(auto)}
+
+
+@router.delete("/planificaciones/{pid}")
+def eliminar_planificacion(pid: int):
+    with SessionLocal() as db:
+        pl = db.get(dbm.Planificacion, pid)
+        if not pl:
+            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        db.delete(pl)
+        db.commit()
+    if _state.get("planificacion_id") == pid:
+        _state["planificacion_id"] = None
+    return {"detail": "Planificación eliminada"}
+
+
+@router.post("/planificaciones/{pid}/versiones", response_model=VersionInfo)
+def guardar_version(pid: int, req: GuardarVersionRequest):
+    """Guarda el estado actual del horario como una versión con nombre."""
+    if _state["status"] != "ready":
+        raise HTTPException(status_code=400, detail="No hay un horario para guardar.")
+    with SessionLocal() as db:
+        pl = db.get(dbm.Planificacion, pid)
+        if not pl:
+            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        v = dbm.Version(planificacion_id=pid, nombre=req.nombre, es_autosave=False,
+                        estado_json=_serializar_estado())
+        db.add(v)
+        db.commit()
+        db.refresh(v)
+        return VersionInfo(id=v.id, planificacion_id=pid, nombre=v.nombre,
+                           creada=v.creada.isoformat() if v.creada else "", es_autosave=False)
+
+
+@router.get("/planificaciones/{pid}/versiones", response_model=list[VersionInfo])
+def listar_versiones(pid: int):
+    with SessionLocal() as db:
+        pl = db.get(dbm.Planificacion, pid)
+        if not pl:
+            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        return [
+            VersionInfo(id=v.id, planificacion_id=pid, nombre=v.nombre,
+                        creada=v.creada.isoformat() if v.creada else "", es_autosave=v.es_autosave)
+            for v in sorted(pl.versiones, key=lambda x: x.creada or datetime.min, reverse=True)
+        ]
+
+
+@router.post("/versiones/{vid}/cargar")
+def cargar_version(vid: int):
+    """Carga una versión guardada: restaura el horario desde su JSON (re-parsea los datos)."""
+    with SessionLocal() as db:
+        v = db.get(dbm.Version, vid)
+        if not v:
+            raise HTTPException(status_code=404, detail="Versión no encontrada.")
+        pl = db.get(dbm.Planificacion, v.planificacion_id)
+        _escribir_inputs(pl)
+        _state["planificacion_id"] = pl.id
+        try:
+            datos = cargar_datos(INPUTS_DIR)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Error al leer los archivos: {exc}")
+        _restaurar_estado(v.estado_json, datos)
+    return {"detail": "Versión cargada"}
+
+
+@router.delete("/versiones/{vid}")
+def eliminar_version(vid: int):
+    with SessionLocal() as db:
+        v = db.get(dbm.Version, vid)
+        if not v:
+            raise HTTPException(status_code=404, detail="Versión no encontrada.")
+        if v.es_autosave:
+            raise HTTPException(status_code=400, detail="No se puede eliminar el autoguardado.")
+        db.delete(v)
+        db.commit()
+    return {"detail": "Versión eliminada"}
 
 
 @router.get("/export")

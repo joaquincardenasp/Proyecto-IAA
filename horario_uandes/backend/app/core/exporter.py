@@ -1,12 +1,10 @@
 """
 exporter.py — Exporta el horario generado a Excel (.xlsx).
 
-Hojas:
-  "Horario"       — Tabla completa de secciones con sus bloques asignados
-  "Plan Común"    — Secciones filtradas por carrera, agrupadas por semestre
-  "ICI" … "ICQ"  — Ídem por carrera
-  "Métricas"      — Resumen estadístico y fitness de restricciones blandas
-  "REPORTE"       — Detalle de todas las violaciones de restricciones (si se pasa reporte)
+Formato del cliente: una hoja única "HORARIO ING" **idéntica** a
+inputs/historico/Horario ING_202520.xlsx — una fila por (sección, bloque), con la hora en
+la columna del día correspondiente (ver _sheet_historico). Las funciones _sheet_horario /
+_sheet_carrera / _sheet_metricas / _sheet_reporte quedaron sin uso (formato anterior).
 """
 from __future__ import annotations
 
@@ -458,6 +456,102 @@ def _sheet_reporte(wb: openpyxl.Workbook, reporte: dict) -> None:
 # Función pública
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Hoja en formato HISTÓRICO (Horario ING) — el que usa el cliente
+# ---------------------------------------------------------------------------
+
+_HIST_HEADER = [
+    "AREA", "PLAN DE ESTUDIO", "NRC", "CONECTOR LIGA", "LISTA CRUZADA", "MATERIA",
+    "CURSO", "SECC.", "TITULO", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes",
+    "INICIO", "FIN", "SALA", "TIPO DE REUNION", "PROFESOR",
+]
+_HIST_LEYENDA = [
+    ("CLAS", "CLASES"), ("OLIN", "CLASES ONLINE"), ("AYUD", "AYUDANTIA"),
+    ("AYON", "AYUDANTIA ONLINE"), ("LABT", "LABORATORIO"), ("EXAM", "EXAMEN"),
+    ("PRBA", "PRUEBA (1, 2, 3...)"),
+]
+_DIA_A_COL = {"L": 10, "M": 11, "X": 12, "J": 13, "V": 14}  # columnas Lunes..Viernes
+
+
+def _split_codigo(codigo: str) -> tuple[str, str]:
+    """'ING1100' → ('ING', '1100'): separa MATERIA (sigla) de CURSO (número)."""
+    i = 0
+    while i < len(codigo) and not codigo[i].isdigit():
+        i += 1
+    return codigo[:i], codigo[i:]
+
+
+def _sheet_historico(wb, datos: DatosProblema, asignaciones: dict[str, list[int]]) -> None:
+    """
+    Hoja única con el MISMO formato que inputs/historico/Horario ING_202520.xlsx:
+    una fila por (sección, bloque), con la hora en la columna del día correspondiente.
+    """
+    ws = wb.create_sheet("HORARIO ING")
+    sec_by_id = {s.id: s for s in datos.secciones}
+
+    def prof_nom(rut: str) -> str:
+        p = datos.profesores.get(rut)
+        return (p.nombre if p and p.nombre else rut) or ""
+
+    # Leyenda de tipos de reunión (arriba, como el histórico)
+    ws.cell(row=4, column=1, value="TIPO HORARIO").font = Font(bold=True)
+    ws.cell(row=4, column=2, value="DESCRIPCION").font = Font(bold=True)
+    for i, (t, d) in enumerate(_HIST_LEYENDA):
+        ws.cell(row=5 + i, column=1, value=t)
+        ws.cell(row=5 + i, column=2, value=d)
+
+    # Encabezado del grid en la fila 14 (igual que el histórico)
+    HDR = 14
+    for c, name in enumerate(_HIST_HEADER, start=1):
+        cell = ws.cell(row=HDR, column=c, value=name)
+        cell.font = Font(bold=True, color=_C["white"])
+        cell.fill = PatternFill("solid", fgColor=_C["header_dark"])
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Una fila por (sección, bloque)
+    filas = []
+    for sid, bloques in asignaciones.items():
+        s = sec_by_id.get(sid)
+        if not s:
+            continue
+        curso = datos.cursos.get(s.codigo_curso)
+        materia, num = _split_codigo(s.codigo_curso)
+        sala = curso.sala_especial if curso and curso.sala_especial else ""
+        for b in bloques:
+            blk = TODOS_BLOQUES[b]
+            filas.append({
+                "area": s.area, "plan": s.plan, "nrc": s.nrc, "conector": s.conector,
+                "materia": materia, "curso": num, "secc": s.seccion,
+                "titulo": curso.titulo if curso else "",
+                "dia": blk.dia.value, "hora": f"{blk.hora_inicio}-{blk.hora_fin}",
+                "sala": sala, "tipo": s.componente.value, "prof": prof_nom(s.rut_profesor),
+            })
+    filas.sort(key=lambda f: (f["area"], f["materia"], f["curso"], str(f["secc"]), f["tipo"]))
+
+    r = HDR + 1
+    for f in filas:
+        ws.cell(row=r, column=1, value=f["area"])
+        ws.cell(row=r, column=2, value=f["plan"])
+        ws.cell(row=r, column=3, value=f["nrc"])
+        ws.cell(row=r, column=4, value=f["conector"])
+        # col 5 LISTA CRUZADA → sin dato
+        ws.cell(row=r, column=6, value=f["materia"])
+        ws.cell(row=r, column=7, value=f["curso"])
+        ws.cell(row=r, column=8, value=f["secc"])
+        ws.cell(row=r, column=9, value=f["titulo"])
+        ws.cell(row=r, column=_DIA_A_COL[f["dia"]], value=f["hora"])
+        # cols 15/16 INICIO/FIN → sin dato (fechas del calendario académico)
+        ws.cell(row=r, column=17, value=f["sala"])
+        ws.cell(row=r, column=18, value=f["tipo"])
+        ws.cell(row=r, column=19, value=f["prof"])
+        r += 1
+
+    anchos = [16, 14, 8, 13, 13, 8, 7, 6, 42, 12, 12, 12, 12, 12, 10, 10, 12, 15, 34]
+    for i, w in enumerate(anchos, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = f"A{HDR + 1}"
+
+
 def exportar_horario(
     datos: DatosProblema,
     asignaciones: dict[str, list[int]],
@@ -466,13 +560,10 @@ def exportar_horario(
     reporte: Optional[dict] = None,
 ) -> bytes:
     """
-    Genera un archivo Excel con el horario completo.
-
-    Args:
-        datos:        Datos del problema (cursos, secciones, profesores).
-        asignaciones: Mapa sec_id → [bloque_idx, ...] (salida del GA o CP-SAT).
-        output_path:  Si se da, guarda el .xlsx en esa ruta además de retornar bytes.
-        metricas:     Dict opcional: fitness_cpsat, fitness_ga, mejora_pct, rb_detalle.
+    Genera el Excel del horario en el **formato del cliente** (idéntico a
+    inputs/historico/Horario ING_202520.xlsx): una hoja "HORARIO ING" con una fila por
+    (sección, bloque). Los parámetros metricas/reporte se mantienen por compatibilidad de
+    firma pero ya no generan hojas aparte (el cliente usa solo este formato).
 
     Returns:
         Bytes del .xlsx (listos para respuesta HTTP o escritura manual).
@@ -480,12 +571,7 @@ def exportar_horario(
     wb = openpyxl.Workbook()
     wb.remove(wb.active)           # eliminar hoja "Sheet" por defecto
 
-    _sheet_horario(wb, datos, asignaciones)
-    for carrera in _CARRERAS:
-        _sheet_carrera(wb, datos, asignaciones, carrera)
-    _sheet_metricas(wb, datos, asignaciones, metricas)
-    if reporte:
-        _sheet_reporte(wb, reporte)
+    _sheet_historico(wb, datos, asignaciones)
 
     buf = io.BytesIO()
     wb.save(buf)

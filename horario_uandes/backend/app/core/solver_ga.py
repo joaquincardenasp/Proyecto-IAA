@@ -6,6 +6,7 @@ Restricciones blandas (RB):
   RB2  (80): Prof jornada no asignado en 8:30 ni 17:30
   RB3  (50): Distintos componentes del mismo curso en días distintos
   RB4  (50): Máximo 1 bloque del mismo componente por curso por día
+  RB5  (60): Sin ventanas entre bloques del mismo profesor el mismo día (umbral 10 min)
 
 Pesos configurables en PESOS al inicio del archivo.
 """
@@ -19,7 +20,7 @@ from typing import Any
 
 from deap import base, creator, tools
 
-from .blocks import MATRIZ_SOLAPAMIENTO, SET_ESTANDAR, TODOS_BLOQUES
+from .blocks import BLOQUES_1H, BLOQUES_2H_SET, MATRIZ_SOLAPAMIENTO, SET_ESTANDAR, TODOS_BLOQUES
 from .models import DatosProblema, TipoProfesor, TipoReunion
 from .solver_cpsat import disponibilidad_seccion
 
@@ -32,7 +33,10 @@ PESOS: dict[str, int] = {
     "RB2":  80,
     "RB3":  50,
     "RB4":  50,
+    "RB5":  60,
 }
+_MIN_VENTANA = 10  # huecos de hasta este valor (minutos) no se penalizan
+
 
 # Preferencia por la grilla estándar: cada bloque helper (no estándar) usado suma
 # esta penalización. Mantiene las clases en los horarios institucionales salvo que
@@ -132,10 +136,19 @@ def construir_contexto(
         )
         rep_es_jornada.append(es_jornada)
 
-        # Bloques disponibles para este rep: EXACTAMENTE el mismo dominio que usa CP-SAT
-        # (disponibilidad_seccion ya filtra por duración 2h/3h, RD2 y RD7). Reutilizar la
-        # misma función garantiza que el GA nunca mueva una sección fuera de lo permitido.
-        rep_disponibles.append(sorted(disponibilidad_seccion(datos, s)))
+        # Bloques disponibles: usar disponibilidad_seccion como base (RD2+RD7 ya aplicados)
+        # y luego filtrar por tipo de bloque para el caso 2+1.
+        disponibles_base = sorted(disponibilidad_seccion(datos, s))
+
+        tipos = s.tipos_bloques_necesarios
+        if tipos:
+            # 2+1: lista de listas [[dom_2h], [dom_1h]]
+            rep_disponibles.append([
+                [b for b in disponibles_base if b in BLOQUES_2H_SET],
+                [b for b in disponibles_base if b in BLOQUES_1H],
+            ])
+        else:
+            rep_disponibles.append([b for b in disponibles_base if b not in BLOQUES_1H])
 
         rep_es_prog_labt.append(
             s.codigo_curso == CURSO_PROGRAMACION and s.componente == TipoReunion.LABT
@@ -189,8 +202,12 @@ def construir_contexto(
     for i, sec_ids in enumerate(rep_seccion_ids):
         for sec_id in sec_ids:
             s = sec_by_id[sec_id]
-            if s.afecta_disponibilidad and s.rut_profesor:
-                por_prof_set[s.rut_profesor].add(i)
+            if not s.afecta_disponibilidad:
+                continue
+            # Incluye al profesor 2 co-dictante: ambos deben quedar sin solape.
+            for rut in (s.rut_profesor, s.rut_profesor_2):
+                if rut:
+                    por_prof_set[rut].add(i)
     for prof_idxs in por_prof_set.values():
         idxs = sorted(prof_idxs)
         for a in range(len(idxs)):
@@ -356,6 +373,23 @@ def calcular_fitness(individuo: list[list[int]], ctx: GAContexto) -> tuple[float
         for count in cnt.values():
             if count > 1:
                 penalty += (count - 1) * PESOS["RB4"]
+    # RB5: ventanas de profesor (hueco entre bloques del mismo día)
+    por_prof_dia: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for i in range(len(ctx.reps)):
+        rut = ctx.rep_prof[i]
+        if not rut:
+            continue
+        for b in individuo[i]:
+            por_prof_dia[(rut, _DIA_DEL_BLOQUE[b])].append(b)
+
+    for bloques_dia in por_prof_dia.values():
+        if len(bloques_dia) < 2:
+            continue
+        ordenados = sorted(bloques_dia, key=lambda b: _MIN_INICIO_BLOQUE[b])
+        for k in range(len(ordenados) - 1):
+            hueco = _MIN_INICIO_BLOQUE[ordenados[k + 1]] - _MIN_FIN_BLOQUE[ordenados[k]]
+            if hueco > _MIN_VENTANA:
+                penalty += PESOS["RB5"]
 
     # Preferencia por la grilla estándar: penalizar cada bloque helper usado.
     for i in range(len(ctx.reps)):
@@ -382,11 +416,25 @@ def mutate_ga(
     for rep_idx in orden:
         disponibles = ctx.rep_disponibles[rep_idx]
         n = ctx.rep_n_blocks[rep_idx]
-        if len(disponibles) < n:
-            continue
+
+        # Detectar si es dominio por tipo (lista de listas = caso 2+1)
+        es_2mas1 = isinstance(disponibles[0], list) if disponibles else False
+
+        if es_2mas1:
+            dom_por_tipo = disponibles  # [[dom_2h], [dom_1h]]
+            if any(len(d) == 0 for d in dom_por_tipo):
+                continue
+        else:
+            if len(disponibles) < n:
+                continue
 
         for _ in range(n_intentos):
-            candidato = sorted(random.sample(disponibles, n))
+            if es_2mas1:
+                candidato = sorted(
+                    random.choice(dom_por_tipo[k]) for k in range(n)
+                )
+            else:
+                candidato = sorted(random.sample(disponibles, n))
             if _es_factible(rep_idx, candidato, individuo, ctx):
                 individuo[rep_idx] = candidato
                 return (individuo,)
@@ -437,8 +485,8 @@ class ResultadoGA:
 def ejecutar_ga(
     datos: DatosProblema,
     asignaciones_cpsat: dict[str, list[int]],
-    n_generaciones: int = 200,
-    pop_size: int = 40,
+    n_generaciones: int = 1000,
+    pop_size: int = 80,
     cxpb: float = 0.5,
     mutpb: float = 0.4,
     seed: int = 42,

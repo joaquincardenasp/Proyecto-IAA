@@ -10,10 +10,15 @@ venv/
 # Excel files
 *.xlsx
 
+# Base de datos local (SQLite) — en prod se usa Postgres vía DATABASE_URL
+*.db
+*.sqlite
+*.sqlite3
+
 CLAUDE.md
 PRD.md
 CONTEXT.md
-horario_uandes/backend/tests
 
 node_modules/
 dist/
+docs/

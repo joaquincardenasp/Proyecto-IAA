@@ -41,11 +41,12 @@ def check(cond: bool, msg: str) -> None:
 def test_blocks() -> None:
     print("\n--- test_blocks ---")
 
-    # Catálogo ampliado: 7 bloques estándar + 12 helper = 19 tipos × 5 días = 95
-    check(N_BLOQUES == 95, f"95 bloques totales (hay {N_BLOQUES})")
+    # Catálogo: 30 tipos (2h/3h estándar + helper + 1h de 8:30 a 18:30) × 5 días = 150
+    check(N_BLOQUES == 150, f"150 bloques totales (hay {N_BLOQUES})")
 
+    # Estándar: 5 (2h) + 2 (3h) + 11 (1h, 8:30–18:30) = 18 tipos × 5 días = 90
     estandar = [b for b in TODOS_BLOQUES if b.es_estandar]
-    check(len(estandar) == 35, f"35 bloques estándar (7 tipos × 5 días) (hay {len(estandar)})")
+    check(len(estandar) == 90, f"90 bloques estándar (18 tipos × 5 días) (hay {len(estandar)})")
 
     # Los bloques 3h ESTÁNDAR inician en 10:30 o 12:30; los helper rellenan otros inicios
     b3h_std = [b for b in TODOS_BLOQUES if b.tipo == "3h" and b.es_estandar]
@@ -190,8 +191,9 @@ def test_invariantes_secciones(datos) -> None:
 
     # Todas las secciones tienen >= 1 bloque
     check(
-        all(s.cantidad_bloques_necesarios >= 1 for s in secciones),
-        "Todas las secciones tienen cantidad_bloques_necesarios >= 1",
+        all(s.cantidad_bloques_necesarios >= 1
+            for s in secciones if not s.distribucion_indefinida),
+        "Las secciones programables tienen cantidad_bloques_necesarios >= 1",
     )
 
     # id en formato "{codigo}-{seccion}-{componente}"
@@ -242,17 +244,35 @@ def test_invariantes_cursos(datos) -> None:
                     f"{codigo} ({carrera}): semestre '{sem}' debe ser string",
                 )
 
-    # Cursos Plan Común NO tienen columnas de especialidad
+    # Regla Plan Común:
+    #   sem 1-4 → SIN columnas de especialidad (todas las carreras cursan lo mismo).
+    #   sem 5+  → expandido a TODAS las especialidades en el MISMO número de semestre
+    #             (los cursan todos los alumnos; deben no-topar con cualquier curso de ese
+    #             semestre). Ver _expandir_plan_comun_superior en parser.py.
+    def _num_sem(s: str) -> int:
+        d = "".join(ch for ch in str(s) if ch.isdigit())
+        return int(d) if d else -1
+
     for codigo, curso in datos.cursos.items():
-        if "Plan Común" in curso.semestres_por_carrera:
-            especialidades = [
-                c for c in curso.semestres_por_carrera
-                if c != "Plan Común"
-            ]
+        sems_pc = curso.semestres_por_carrera.get("Plan Común")
+        if not sems_pc:
+            continue
+        nums_pc = {_num_sem(s) for s in sems_pc}
+        especialidades = [c for c in curso.semestres_por_carrera if c != "Plan Común"]
+        if all(n <= 4 for n in nums_pc):
             check(
                 len(especialidades) == 0,
-                f"{codigo}: curso Plan Común no debe tener carreras de especialidad {especialidades}",
+                f"{codigo}: Plan Común sem 1-4 no debe tener especialidades {especialidades}",
             )
+        else:
+            nums_pc_sup = {n for n in nums_pc if n >= 5}
+            for c in especialidades:
+                for sem in curso.semestres_por_carrera[c]:
+                    check(
+                        _num_sem(sem) in nums_pc_sup,
+                        f"{codigo}: especialidad {c} sem '{sem}' debe coincidir con un "
+                        f"semestre Plan Común 5+ {sorted(nums_pc_sup)}",
+                    )
 
     # Sufijos de mención se preservan: si existen "9a" o "9f", no deben colapsar a "9"
     for codigo, curso in datos.cursos.items():
@@ -290,7 +310,10 @@ def test_horas_a_bloques(datos) -> None:
         curso = cursos.get(s.codigo_curso)
         if not curso:
             continue
-        if s.componente == TipoReunion.CLAS and curso.clases_horas == 2:
+        # Las secciones 2+1 (tipos_bloques_necesarios=["2h","1h"]) llevan 2 bloques
+        # legítimamente (uno de 2h + uno de 1h), aunque el curso tenga clases_horas == 2.
+        if (s.componente == TipoReunion.CLAS and curso.clases_horas == 2
+                and not s.tipos_bloques_necesarios):
             check(
                 s.cantidad_bloques_necesarios == 1,
                 f"{s.codigo_curso} (2h CLAS) → 1 bloque (es {s.cantidad_bloques_necesarios})",
@@ -314,8 +337,9 @@ def test_horas_a_bloques(datos) -> None:
 
     # Ninguna sección puede tener 0 bloques
     check(
-        all(s.cantidad_bloques_necesarios >= 1 for s in secciones),
-        "Ninguna sección tiene cantidad_bloques_necesarios < 1",
+        all(s.cantidad_bloques_necesarios >= 1
+            for s in secciones if not s.distribucion_indefinida),
+        "Ninguna sección programable tiene cantidad_bloques_necesarios < 1",
     )
 
     # Hay secciones con más de 1 bloque (multi-bloque)

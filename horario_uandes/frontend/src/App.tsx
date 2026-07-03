@@ -1,32 +1,34 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { AlertCircle, Check, Download, Loader2 } from "lucide-react";
-import { getStatus, getResults, EXPORT_URL } from "./api/client";
-import type { SolveResult, StatusResponse } from "./types";
+import { AlertCircle, AlertTriangle, Check, Download, Loader2, ChevronLeft, LogOut } from "lucide-react";
+import {
+  getStatus, getResults, postSolve, activarPlanificacion, descargarExcel,
+  getAuthConfig, getMe, logout, type Usuario,
+} from "./api/client";
+import type { SolveResult, StatusResponse, PlanificacionInfo } from "./types";
+import LoginScreen from "./components/LoginScreen";
 import SolverPanel from "./components/SolverPanel";
-import HorarioGrid from "./components/HorarioGrid";
+import HorarioWorkspace from "./components/HorarioWorkspace";
 import MetricasPanel from "./components/MetricasPanel";
+import DiagnosticoPanel from "./components/DiagnosticoPanel";
+import DecisionesPanel from "./components/DecisionesPanel";
+import InicioPlanificaciones from "./components/InicioPlanificaciones";
+import VersionesPanel from "./components/VersionesPanel";
 
-type Tab = "solver" | "horario" | "metricas";
+type Vista = "inicio" | "workspace";
+type Tab = "solver" | "horario" | "metricas" | "diagnostico" | "decisiones" | "versiones";
 
 // ── Etapas del proceso ────────────────────────────────────────────────────────
 
 const STAGES: { label: string; match: (p: string) => boolean }[] = [
-  {
-    label: "Leyendo archivos",
-    match: (p) => p.includes("datos") || p.includes("Iniciando"),
-  },
+  { label: "Leyendo archivos", match: (p) => p.includes("datos") || p.includes("Iniciando") },
   {
     label: "Generando horario base",
-    match: (p) => p.includes("CP-SAT") && !p.includes("GA"),
+    match: (p) =>
+      p.includes("mejor horario") || p.includes("Diagnosticando") ||
+      (p.includes("CP-SAT") && !p.includes("GA")),
   },
-  {
-    label: "Optimizando (Alg. Genético)",
-    match: (p) => p.includes("GA") || p.includes("métricas"),
-  },
-  {
-    label: "Exportando resultados",
-    match: (p) => p.includes("Excel") || p.includes("Completado"),
-  },
+  { label: "Optimizando (Alg. Genético)", match: (p) => p.includes("GA") || p.includes("métricas") },
+  { label: "Exportando resultados", match: (p) => p.includes("Excel") || p.includes("Completado") },
 ];
 
 function progressToStage(progress: string): number {
@@ -37,20 +39,32 @@ function progressToStage(progress: string): number {
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [vista, setVista] = useState<Vista>("inicio");
   const [tab, setTab] = useState<Tab>("solver");
-  const [status, setStatus] = useState<StatusResponse>({
-    status: "idle",
-    progress: "",
-    error: "",
-  });
+  const [status, setStatus] = useState<StatusResponse>({ status: "idle", progress: "", error: "" });
   const [results, setResults] = useState<SolveResult | null>(null);
+  const [activa, setActiva] = useState<PlanificacionInfo | null>(null);
+  const [user, setUser] = useState<Usuario | null>(null);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [authChecked, setAuthChecked] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Config de auth en RUNTIME (desde el backend), y verificación de sesión.
+  useEffect(() => {
+    (async () => {
+      const cfg = await getAuthConfig();
+      setAuthEnabled(cfg.auth_enabled);
+      setClientId(cfg.google_client_id);
+      if (cfg.auth_enabled) {
+        try { setUser(await getMe()); } catch { /* sin sesión */ }
+      }
+      setAuthChecked(true);
+    })();
+  }, []);
+
   const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   }, []);
 
   const startPolling = useCallback(() => {
@@ -64,13 +78,11 @@ export default function App() {
           stopPolling();
           const r = await getResults();
           setResults(r);
-          setTab("horario");
+          setTab(r.estado === "INFEASIBLE" ? "diagnostico" : "horario");
         } else if (s.status === "error") {
           stopPolling();
         }
-      } catch (e) {
-        console.error("Poll error:", e);
-      }
+      } catch (e) { console.error("Poll error:", e); }
     }, 2000);
   }, [stopPolling]);
 
@@ -79,95 +91,185 @@ export default function App() {
   const isRunning = status.status === "running";
   const activeStage = isRunning ? progressToStage(status.progress) : 0;
 
+  const tieneHorario = !!results && results.secciones.length > 0;
+  const tieneDiagnostico = !!results?.diagnostico && results.diagnostico.unidades.length > 0;
+  const nBloqueadas = results?.diagnostico?.unidades.length ?? 0;
+  const decisiones = results?.decisiones ?? [];
+  const nDecisionesPend = decisiones.filter((d) => d.requerida && !d.actual).length;
+
+  // Refresca estado + resultados (tras activar/cargar). No navega de pestaña.
+  const onRestaurado = useCallback(async () => {
+    try {
+      const s = await getStatus();
+      setStatus(s);
+      setResults(s.status === "ready" ? await getResults() : null);
+    } catch (e) { console.error("Restaurar error:", e); }
+  }, []);
+
+  // Entrar al espacio de trabajo de una planificación.
+  const abrir = useCallback(async (pl: PlanificacionInfo) => {
+    setActiva(pl);
+    setVista("workspace");
+    setTab(pl.tiene_horario ? "horario" : "solver");
+    try {
+      await activarPlanificacion(pl.id);
+      await onRestaurado();
+    } catch (e) { console.error("Abrir error:", e); }
+  }, [onRestaurado]);
+
+  const volver = useCallback(() => {
+    stopPolling();
+    setVista("inicio");
+    setActiva(null);
+    setResults(null);
+    setStatus({ status: "idle", progress: "", error: "" });
+  }, [stopPolling]);
+
+  const regenerar = useCallback(async () => {
+    if (!window.confirm(
+      "Regenerar recreará el horario desde cero y descartará las ediciones manuales de " +
+        "bloques (los movimientos). Las decisiones de distribución sí se conservan. ¿Continuar?",
+    )) return;
+    try { await postSolve(); startPolling(); } catch (e) { console.error("Regenerar error:", e); }
+  }, [startPolling]);
+
   const TABS: { id: Tab; label: string; disabled?: boolean }[] = [
     { id: "solver", label: "Generar horario" },
-    { id: "horario", label: "Horario", disabled: !results },
-    { id: "metricas", label: "Métricas", disabled: !results },
+    { id: "horario", label: "Horario", disabled: !tieneHorario },
+    { id: "metricas", label: "Métricas", disabled: !results?.metricas },
+    { id: "diagnostico", label: "Diagnóstico", disabled: !tieneDiagnostico },
+    { id: "decisiones", label: "Decisiones", disabled: decisiones.length === 0 },
+    { id: "versiones", label: "Versiones" },
   ];
 
+  const enWorkspace = vista === "workspace";
+
+  // ── Gate de autenticación ────────────────────────────────────────────────
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-[#F7F8FA] flex items-center justify-center">
+        <Loader2 size={22} className="animate-spin text-gray-400" />
+      </div>
+    );
+  }
+  if (authEnabled && !user) {
+    return <LoginScreen clientId={clientId} onLogin={setUser} />;
+  }
+
   return (
-    <div className="min-h-screen bg-[#FAFAFA] flex flex-col">
-      {/* ── Header institucional ──────────────────────────────────────────── */}
-      <header className="bg-[#B71C1C] shrink-0">
-        <div className="max-w-screen-xl mx-auto px-6 py-4 flex items-center gap-5">
-          {/* Logotipo textual */}
-          <div className="border-r border-red-700 pr-5 shrink-0">
-            <span className="text-white font-bold text-sm tracking-widest uppercase">
-              Uandes
-            </span>
+    <div className="min-h-screen bg-[#F7F8FA] flex flex-col">
+      {/* ── Header (claro, con línea de acento roja) ──────────────────────── */}
+      <header className="bg-white border-b-2 border-[#B71C1C] shrink-0">
+        <div className="max-w-[1700px] mx-auto px-6 py-3.5 flex items-center gap-5">
+          <div className="border-r border-gray-200 pr-5 shrink-0">
+            <span className="text-[#B71C1C] font-bold text-sm tracking-widest uppercase">Uandes</span>
           </div>
 
-          {/* Título */}
-          <div className="flex-1 min-w-0">
-            <h1 className="text-white font-semibold text-sm leading-tight truncate">
-              Generador de Horarios
-            </h1>
-            <p className="text-red-300 text-xs mt-0.5 truncate">
-              Facultad de Ingeniería y Ciencias Aplicadas
-            </p>
-          </div>
+          {enWorkspace && activa ? (
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+              <button
+                onClick={volver}
+                className="flex items-center gap-1 text-xs font-medium text-gray-500
+                           hover:text-gray-900 hover:bg-gray-100 px-2 py-1 rounded transition-colors shrink-0"
+              >
+                <ChevronLeft size={14} /> Planificaciones
+              </button>
+              <div className="min-w-0">
+                <h1 className="text-gray-900 font-semibold text-sm leading-tight truncate">
+                  {activa.nombre}
+                </h1>
+                <p className="text-gray-400 text-xs leading-tight truncate">Generador de Horarios</p>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 min-w-0">
+              <h1 className="text-gray-900 font-semibold text-sm leading-tight truncate">
+                Generador de Horarios
+              </h1>
+              <p className="text-gray-400 text-xs mt-0.5 truncate">
+                Facultad de Ingeniería y Ciencias Aplicadas
+              </p>
+            </div>
+          )}
 
-          {/* Acciones */}
           <div className="flex items-center gap-3 shrink-0">
             {isRunning && (
-              <span className="flex items-center gap-1.5 text-xs text-red-200">
-                <Loader2 size={13} className="animate-spin" />
-                Procesando
+              <span className="flex items-center gap-1.5 text-xs text-gray-500">
+                <Loader2 size={13} className="animate-spin" /> Procesando
               </span>
             )}
-            {results && (
-              <a
-                href={EXPORT_URL}
-                download="horario_generado.xlsx"
-                className="flex items-center gap-1.5 text-xs font-medium bg-white
-                           text-[#B71C1C] hover:bg-red-50 px-3 py-1.5 rounded
-                           transition-colors"
+            {enWorkspace && tieneHorario && (
+              <button
+                onClick={() => descargarExcel().catch((e) => alert(String(e)))}
+                className="flex items-center gap-1.5 text-xs font-medium bg-gray-900 text-white
+                           hover:bg-gray-800 px-3 py-1.5 rounded transition-colors"
               >
-                <Download size={13} />
-                Descargar Excel
-              </a>
+                <Download size={13} /> Descargar Excel
+              </button>
+            )}
+            {authEnabled && user && (
+              <div className="flex items-center gap-2 pl-3 border-l border-gray-200">
+                <span className="text-xs text-gray-500 max-w-[170px] truncate hidden sm:block">
+                  {user.email}
+                </span>
+                <button
+                  onClick={() => { logout(); setUser(null); }}
+                  title="Cerrar sesión"
+                  className="text-gray-400 hover:text-gray-700 p-1 rounded transition-colors"
+                >
+                  <LogOut size={15} />
+                </button>
+              </div>
             )}
           </div>
         </div>
       </header>
 
-      {/* ── Barra de navegación ───────────────────────────────────────────── */}
-      <div className="bg-white border-b border-gray-200 shrink-0">
-        <div className="max-w-screen-xl mx-auto px-6">
-          <nav className="flex">
-            {TABS.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => !t.disabled && setTab(t.id)}
-                disabled={t.disabled}
-                className={`px-5 py-3.5 text-sm font-medium border-b-2 transition-colors
-                  ${
-                    tab === t.id
+      {/* ── Barra de pestañas (solo en el espacio de trabajo) ─────────────── */}
+      {enWorkspace && (
+        <div className="bg-white border-b border-gray-200 shrink-0">
+          <div className="max-w-[1700px] mx-auto px-6">
+            <nav className="flex">
+              {TABS.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => !t.disabled && setTab(t.id)}
+                  disabled={t.disabled}
+                  className={`px-5 py-3.5 text-sm font-medium border-b-2 transition-colors
+                    ${tab === t.id
                       ? "border-[#B71C1C] text-[#B71C1C]"
                       : t.disabled
                         ? "border-transparent text-gray-300 cursor-not-allowed"
                         : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
-                  }`}
-              >
-                {t.label}
-                {t.id === "horario" && results && (
-                  <span
-                    className="ml-2 text-[11px] bg-gray-100 text-gray-500
-                                   px-1.5 py-0.5 rounded font-normal tabular-nums"
-                  >
-                    {results.secciones.length}
-                  </span>
-                )}
-              </button>
-            ))}
-          </nav>
+                    }`}
+                >
+                  {t.label}
+                  {t.id === "horario" && tieneHorario && (
+                    <span className="ml-2 text-[11px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-normal tabular-nums">
+                      {results!.secciones.length}
+                    </span>
+                  )}
+                  {t.id === "diagnostico" && tieneDiagnostico && (
+                    <span className="ml-2 text-[11px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium tabular-nums">
+                      {nBloqueadas}
+                    </span>
+                  )}
+                  {t.id === "decisiones" && nDecisionesPend > 0 && (
+                    <span className="ml-2 text-[11px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-medium tabular-nums">
+                      {nDecisionesPend}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </nav>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ── Progreso por etapas ───────────────────────────────────────────── */}
-      {isRunning && (
+      {enWorkspace && isRunning && (
         <div className="bg-white border-b border-gray-100 py-4 shrink-0">
-          <div className="max-w-screen-xl mx-auto px-6">
+          <div className="max-w-[1700px] mx-auto px-6">
             <div className="flex items-center">
               {STAGES.map((stage, i) => {
                 const num = i + 1;
@@ -175,54 +277,25 @@ export default function App() {
                 const isActive = activeStage === num;
                 const isLast = i === STAGES.length - 1;
                 return (
-                  <div
-                    key={i}
-                    className="flex items-center flex-1 last:flex-none"
-                  >
+                  <div key={i} className="flex items-center flex-1 last:flex-none">
                     <div className="flex items-center gap-2 shrink-0">
-                      <div
-                        className={`w-6 h-6 rounded-full flex items-center justify-center
-                          ${
-                            isDone
-                              ? "bg-green-600"
-                              : isActive
-                                ? "bg-[#B71C1C]"
-                                : "bg-gray-200"
-                          }`}
-                      >
+                      <div className={`w-6 h-6 rounded-full flex items-center justify-center
+                        ${isDone ? "bg-green-600" : isActive ? "bg-[#B71C1C]" : "bg-gray-200"}`}>
                         {isDone ? (
-                          <Check
-                            size={11}
-                            className="text-white"
-                            strokeWidth={3}
-                          />
+                          <Check size={11} className="text-white" strokeWidth={3} />
                         ) : (
-                          <span
-                            className={`text-[10px] font-bold
-                                ${isActive ? "text-white" : "text-gray-400"}`}
-                          >
+                          <span className={`text-[10px] font-bold ${isActive ? "text-white" : "text-gray-400"}`}>
                             {num}
                           </span>
                         )}
                       </div>
-                      <span
-                        className={`text-xs font-medium hidden md:block
-                          ${
-                            isDone
-                              ? "text-green-600"
-                              : isActive
-                                ? "text-[#B71C1C]"
-                                : "text-gray-400"
-                          }`}
-                      >
+                      <span className={`text-xs font-medium hidden md:block
+                        ${isDone ? "text-green-600" : isActive ? "text-[#B71C1C]" : "text-gray-400"}`}>
                         {stage.label}
                       </span>
                     </div>
                     {!isLast && (
-                      <div
-                        className={`h-px flex-1 mx-3 transition-colors
-                          ${isDone ? "bg-green-300" : "bg-gray-200"}`}
-                      />
+                      <div className={`h-px flex-1 mx-3 transition-colors ${isDone ? "bg-green-300" : "bg-gray-200"}`} />
                     )}
                   </div>
                 );
@@ -232,33 +305,89 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Banner de error ───────────────────────────────────────────────── */}
-      {status.status === "error" && status.error && (
+      {/* ── Banners (solo en workspace) ───────────────────────────────────── */}
+      {enWorkspace && status.status === "error" && status.error && (
         <div className="bg-red-50 border-b border-red-200 px-6 py-2.5 shrink-0">
-          <div
-            className="max-w-screen-xl mx-auto flex items-center gap-2
-                          text-sm text-red-700"
-          >
+          <div className="max-w-[1700px] mx-auto flex items-center gap-2 text-sm text-red-700">
             <AlertCircle size={14} className="shrink-0" />
             {status.error}
           </div>
         </div>
       )}
 
+      {enWorkspace && results && results.estado !== "FACTIBLE" && status.status === "ready" && (
+        <div className={`border-b px-6 py-2.5 shrink-0 ${
+          results.estado === "INFEASIBLE" ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"}`}>
+          <div className={`max-w-[1700px] mx-auto flex items-center gap-2 text-sm ${
+            results.estado === "INFEASIBLE" ? "text-red-700" : "text-amber-700"}`}>
+            <AlertTriangle size={14} className="shrink-0" />
+            {results.estado === "INFEASIBLE" ? (
+              <span>
+                No fue posible generar un horario. Revisa el{" "}
+                <button onClick={() => setTab("diagnostico")} className="font-semibold underline underline-offset-2">
+                  diagnóstico
+                </button>{" "}para ver la causa y las acciones sugeridas.
+              </span>
+            ) : (
+              <span>
+                Horario parcial: {results.secciones.length} secciones generadas. {nBloqueadas} unidad
+                {nBloqueadas !== 1 ? "es" : ""} sin ubicar —{" "}
+                <button onClick={() => setTab("diagnostico")} className="font-semibold underline underline-offset-2">
+                  ver diagnóstico
+                </button>.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {enWorkspace && nDecisionesPend > 0 && status.status === "ready" && (
+        <div className="bg-red-50 border-b border-red-200 px-6 py-2.5 shrink-0">
+          <div className="max-w-[1700px] mx-auto flex items-center gap-2 text-sm text-red-700">
+            <AlertTriangle size={14} className="shrink-0" />
+            <span>
+              {nDecisionesPend} clase{nDecisionesPend !== 1 ? "s" : ""} de 3h sin distribución definida —
+              no se programan hasta decidir.{" "}
+              <button onClick={() => setTab("decisiones")} className="font-semibold underline underline-offset-2">
+                Resolver decisiones
+              </button>.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* ── Contenido ─────────────────────────────────────────────────────── */}
-      <main className="flex-1 max-w-screen-xl mx-auto w-full px-6 py-8">
-        {tab === "solver" && (
-          <SolverPanel status={status} onSolveStarted={startPolling} />
-        )}
-        {tab === "horario" && results && (
-          <HorarioGrid secciones={results.secciones} />
-        )}
-        {tab === "metricas" && results && (
-          <MetricasPanel
-            metricas={results.metricas}
-            secciones={results.secciones}
-            reporte={results.reporte}
+      <main className="flex-1 max-w-[1700px] mx-auto w-full px-6 py-8">
+        {vista === "inicio" && <InicioPlanificaciones onAbrir={abrir} />}
+
+        {enWorkspace && tab === "solver" && (
+          <SolverPanel
+            status={status} onSolveStarted={startPolling}
+            planificacion={activa} onIrAPlanificaciones={volver}
           />
+        )}
+        {enWorkspace && tab === "horario" && tieneHorario && activa && (
+          <HorarioWorkspace
+            secciones={results!.secciones}
+            planificacionId={activa.id}
+            onEdited={async () => setResults(await getResults())}
+            onRestaurado={onRestaurado}
+          />
+        )}
+        {enWorkspace && tab === "metricas" && results?.metricas && (
+          <MetricasPanel metricas={results.metricas} secciones={results.secciones} reporte={results.reporte} />
+        )}
+        {enWorkspace && tab === "diagnostico" && results?.diagnostico && (
+          <DiagnosticoPanel
+            diagnostico={results.diagnostico} estado={results.estado}
+            nColocadas={results.secciones.length}
+          />
+        )}
+        {enWorkspace && tab === "decisiones" && decisiones.length > 0 && (
+          <DecisionesPanel decisiones={decisiones} onRegenerar={regenerar} regenerando={isRunning} />
+        )}
+        {enWorkspace && tab === "versiones" && activa && (
+          <VersionesPanel planificacionId={activa.id} onRestaurado={onRestaurado} />
         )}
       </main>
     </div>
