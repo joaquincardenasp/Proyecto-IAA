@@ -20,8 +20,10 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
+
+from ..auth import require_user
 
 from ..core.blocks import TODOS_BLOQUES
 from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
@@ -745,6 +747,18 @@ def _pl_info(pl: "dbm.Planificacion") -> PlanificacionInfo:
     )
 
 
+def _get_pl_propia(db, pid: int, user: dict) -> "dbm.Planificacion":
+    """
+    Obtiene una planificación verificando que pertenezca al usuario de la sesión.
+    Responde 404 (no 403) si no existe o no es suya, para no filtrar la existencia de
+    planificaciones de otros usuarios.
+    """
+    pl = db.get(dbm.Planificacion, pid)
+    if not pl or (pl.owner_email or "") != user.get("email", ""):
+        raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+    return pl
+
+
 def _validar_archivos(maestro_bytes: bytes, salas_bytes: bytes) -> None:
     """Valida que los archivos subidos tengan el formato esperado. Lanza ValueError si no."""
     import io
@@ -787,6 +801,7 @@ async def crear_planificacion(
     nombre: str = Form(...),
     maestro: UploadFile = File(...),
     salas: UploadFile = File(...),
+    user: dict = Depends(require_user),
 ):
     """Crea una planificación con sus archivos de entrada (blobs) y la deja activa."""
     maestro_bytes = await maestro.read()
@@ -798,6 +813,7 @@ async def crear_planificacion(
     with SessionLocal() as db:
         pl = dbm.Planificacion(
             nombre=nombre,
+            owner_email=user.get("email", ""),
             maestro_nombre=Path(maestro.filename or "Maestro.xlsx").name,
             maestro_bytes=maestro_bytes,
             salas_nombre=Path(salas.filename or "SALAS.xlsx").name,
@@ -821,19 +837,22 @@ async def crear_planificacion(
 
 
 @router.get("/planificaciones", response_model=list[PlanificacionInfo])
-def listar_planificaciones():
+def listar_planificaciones(user: dict = Depends(require_user)):
     with SessionLocal() as db:
-        pls = db.query(dbm.Planificacion).order_by(dbm.Planificacion.actualizada.desc()).all()
+        pls = (
+            db.query(dbm.Planificacion)
+            .filter(dbm.Planificacion.owner_email == user.get("email", ""))
+            .order_by(dbm.Planificacion.actualizada.desc())
+            .all()
+        )
         return [_pl_info(pl) for pl in pls]
 
 
 @router.post("/planificaciones/{pid}/activar")
-def activar_planificacion(pid: int):
+def activar_planificacion(pid: int, user: dict = Depends(require_user)):
     """Activa una planificación: escribe sus archivos, re-parsea y restaura su autoguardado."""
     with SessionLocal() as db:
-        pl = db.get(dbm.Planificacion, pid)
-        if not pl:
-            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        pl = _get_pl_propia(db, pid, user)
         _escribir_inputs(pl)
         _state["planificacion_id"] = pl.id
         try:
@@ -853,11 +872,9 @@ def activar_planificacion(pid: int):
 
 
 @router.delete("/planificaciones/{pid}")
-def eliminar_planificacion(pid: int):
+def eliminar_planificacion(pid: int, user: dict = Depends(require_user)):
     with SessionLocal() as db:
-        pl = db.get(dbm.Planificacion, pid)
-        if not pl:
-            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        pl = _get_pl_propia(db, pid, user)
         db.delete(pl)
         db.commit()
     if _state.get("planificacion_id") == pid:
@@ -866,14 +883,12 @@ def eliminar_planificacion(pid: int):
 
 
 @router.post("/planificaciones/{pid}/versiones", response_model=VersionInfo)
-def guardar_version(pid: int, req: GuardarVersionRequest):
+def guardar_version(pid: int, req: GuardarVersionRequest, user: dict = Depends(require_user)):
     """Guarda el estado actual del horario como una versión con nombre."""
     if _state["status"] != "ready":
         raise HTTPException(status_code=400, detail="No hay un horario para guardar.")
     with SessionLocal() as db:
-        pl = db.get(dbm.Planificacion, pid)
-        if not pl:
-            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        _get_pl_propia(db, pid, user)
         v = dbm.Version(planificacion_id=pid, nombre=req.nombre, es_autosave=False,
                         estado_json=_serializar_estado())
         db.add(v)
@@ -884,11 +899,9 @@ def guardar_version(pid: int, req: GuardarVersionRequest):
 
 
 @router.get("/planificaciones/{pid}/versiones", response_model=list[VersionInfo])
-def listar_versiones(pid: int):
+def listar_versiones(pid: int, user: dict = Depends(require_user)):
     with SessionLocal() as db:
-        pl = db.get(dbm.Planificacion, pid)
-        if not pl:
-            raise HTTPException(status_code=404, detail="Planificación no encontrada.")
+        pl = _get_pl_propia(db, pid, user)
         return [
             VersionInfo(id=v.id, planificacion_id=pid, nombre=v.nombre,
                         creada=v.creada.isoformat() if v.creada else "", es_autosave=v.es_autosave)
@@ -897,13 +910,13 @@ def listar_versiones(pid: int):
 
 
 @router.post("/versiones/{vid}/cargar")
-def cargar_version(vid: int):
+def cargar_version(vid: int, user: dict = Depends(require_user)):
     """Carga una versión guardada: restaura el horario desde su JSON (re-parsea los datos)."""
     with SessionLocal() as db:
         v = db.get(dbm.Version, vid)
         if not v:
             raise HTTPException(status_code=404, detail="Versión no encontrada.")
-        pl = db.get(dbm.Planificacion, v.planificacion_id)
+        pl = _get_pl_propia(db, v.planificacion_id, user)
         _escribir_inputs(pl)
         _state["planificacion_id"] = pl.id
         try:
@@ -915,11 +928,12 @@ def cargar_version(vid: int):
 
 
 @router.delete("/versiones/{vid}")
-def eliminar_version(vid: int):
+def eliminar_version(vid: int, user: dict = Depends(require_user)):
     with SessionLocal() as db:
         v = db.get(dbm.Version, vid)
         if not v:
             raise HTTPException(status_code=404, detail="Versión no encontrada.")
+        _get_pl_propia(db, v.planificacion_id, user)
         if v.es_autosave:
             raise HTTPException(status_code=400, detail="No se puede eliminar el autoguardado.")
         db.delete(v)

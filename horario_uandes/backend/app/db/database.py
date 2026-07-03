@@ -38,3 +38,21 @@ def init_db() -> None:
     """Crea las tablas si no existen. Se llama al iniciar la app."""
     from . import models_db  # noqa: F401  (registra los modelos en Base)
     Base.metadata.create_all(bind=engine)
+    _migrar_owner_email()
+
+
+def _migrar_owner_email() -> None:
+    """
+    Migración ligera: agrega planificacion.owner_email si falta (DBs creadas antes de que la
+    columna existiera). create_all no altera tablas ya creadas, así que lo hacemos a mano.
+    Compatible con SQLite y Postgres (ADD COLUMN básico).
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "planificacion" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("planificacion")}
+    if "owner_email" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE planificacion ADD COLUMN owner_email VARCHAR(320)"))

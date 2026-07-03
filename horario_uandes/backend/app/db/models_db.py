@@ -27,7 +27,8 @@ class Planificacion(Base):
     nombre = Column(String(200), nullable=False)
     creada = Column(DateTime, default=datetime.utcnow)
     actualizada = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    # (owner_email se agregará en la Fase B con auth)
+    # Dueño de la planificación (email de la sesión). Cada usuario solo ve/gestiona las suyas.
+    owner_email = Column(String(320), default="", index=True)
 
     # Archivos de entrada como blobs (bytes del .xlsx)
     maestro_nombre = Column(String(300), default="")
