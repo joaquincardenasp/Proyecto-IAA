@@ -15,8 +15,6 @@ import type {
 const BASE = `${import.meta.env.VITE_API_BASE_URL ?? ''}/api`
 
 // ── Sesión / token ──────────────────────────────────────────────────────────────
-export const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
-export const AUTH_ENABLED = !!GOOGLE_CLIENT_ID
 
 let _token: string | null = localStorage.getItem('authToken')
 export function setToken(t: string | null) {
@@ -36,6 +34,18 @@ function afetch(input: string, init: RequestInit = {}): Promise<Response> {
 // ── Auth ────────────────────────────────────────────────────────────────────────
 
 export interface Usuario { email: string; name: string; picture: string }
+export interface AuthConfig { auth_enabled: boolean; google_client_id: string }
+
+/** Config de auth desde el backend (en runtime, no en build). */
+export async function getAuthConfig(): Promise<AuthConfig> {
+  try {
+    const r = await fetch(`${BASE}/auth/config`)
+    if (!r.ok) return { auth_enabled: false, google_client_id: '' }
+    return r.json()
+  } catch {
+    return { auth_enabled: false, google_client_id: '' }
+  }
+}
 
 export async function loginGoogle(credential: string): Promise<Usuario> {
   const r = await fetch(`${BASE}/auth/google`, {

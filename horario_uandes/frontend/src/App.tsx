@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { AlertCircle, AlertTriangle, Check, Download, Loader2, ChevronLeft, LogOut } from "lucide-react";
 import {
   getStatus, getResults, postSolve, activarPlanificacion, descargarExcel,
-  AUTH_ENABLED, getMe, logout, type Usuario,
+  getAuthConfig, getMe, logout, type Usuario,
 } from "./api/client";
 import type { SolveResult, StatusResponse, PlanificacionInfo } from "./types";
 import LoginScreen from "./components/LoginScreen";
@@ -45,13 +45,22 @@ export default function App() {
   const [results, setResults] = useState<SolveResult | null>(null);
   const [activa, setActiva] = useState<PlanificacionInfo | null>(null);
   const [user, setUser] = useState<Usuario | null>(null);
-  const [authChecked, setAuthChecked] = useState(!AUTH_ENABLED);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [authChecked, setAuthChecked] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Verificar sesión al montar (solo si el auth está activo).
+  // Config de auth en RUNTIME (desde el backend), y verificación de sesión.
   useEffect(() => {
-    if (!AUTH_ENABLED) return;
-    getMe().then((u) => { setUser(u); setAuthChecked(true); }).catch(() => setAuthChecked(true));
+    (async () => {
+      const cfg = await getAuthConfig();
+      setAuthEnabled(cfg.auth_enabled);
+      setClientId(cfg.google_client_id);
+      if (cfg.auth_enabled) {
+        try { setUser(await getMe()); } catch { /* sin sesión */ }
+      }
+      setAuthChecked(true);
+    })();
   }, []);
 
   const stopPolling = useCallback(() => {
@@ -136,15 +145,15 @@ export default function App() {
   const enWorkspace = vista === "workspace";
 
   // ── Gate de autenticación ────────────────────────────────────────────────
-  if (AUTH_ENABLED && !authChecked) {
+  if (!authChecked) {
     return (
       <div className="min-h-screen bg-[#F7F8FA] flex items-center justify-center">
         <Loader2 size={22} className="animate-spin text-gray-400" />
       </div>
     );
   }
-  if (AUTH_ENABLED && !user) {
-    return <LoginScreen onLogin={setUser} />;
+  if (authEnabled && !user) {
+    return <LoginScreen clientId={clientId} onLogin={setUser} />;
   }
 
   return (
@@ -198,7 +207,7 @@ export default function App() {
                 <Download size={13} /> Descargar Excel
               </button>
             )}
-            {AUTH_ENABLED && user && (
+            {authEnabled && user && (
               <div className="flex items-center gap-2 pl-3 border-l border-gray-200">
                 <span className="text-xs text-gray-500 max-w-[170px] truncate hidden sm:block">
                   {user.email}

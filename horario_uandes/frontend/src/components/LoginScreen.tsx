@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { AlertCircle } from 'lucide-react'
-import { GOOGLE_CLIENT_ID, loginGoogle, type Usuario } from '../api/client'
+import { loginGoogle, type Usuario } from '../api/client'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 interface Props {
+  clientId: string
   onLogin: (user: Usuario) => void
 }
 
-export default function LoginScreen({ onLogin }: Props) {
+export default function LoginScreen({ clientId, onLogin }: Props) {
   const btnRef = useRef<HTMLDivElement>(null)
   const [error, setError] = useState('')
 
@@ -20,7 +21,7 @@ export default function LoginScreen({ onLogin }: Props) {
       if (!google?.accounts?.id || !btnRef.current) return
       clearInterval(intento)
       google.accounts.id.initialize({
-        client_id: GOOGLE_CLIENT_ID,
+        client_id: clientId,
         callback: async (resp: any) => {
           try {
             const user = await loginGoogle(resp.credential)
@@ -35,7 +36,7 @@ export default function LoginScreen({ onLogin }: Props) {
       })
     }, 200)
     return () => { cancelado = true; clearInterval(intento) }
-  }, [onLogin])
+  }, [onLogin, clientId])
 
   return (
     <div className="min-h-screen bg-[#F7F8FA] flex items-center justify-center px-4">

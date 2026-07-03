@@ -108,6 +108,15 @@ def login_google(req: GoogleLoginRequest):
     return {"token": _crear_sesion(user), "user": user}
 
 
+@router.get("/auth/config")
+def config():
+    """
+    Config pública de auth para el frontend (en runtime, no en build). Devuelve si el auth
+    está activo y el client id público de Google. NO expone el AUTH_SECRET.
+    """
+    return {"auth_enabled": AUTH_ENABLED, "google_client_id": GOOGLE_CLIENT_ID}
+
+
 @router.get("/auth/me")
 def me(user: dict = Depends(require_user)):
     """Devuelve el usuario de la sesión actual (o anónimo si el auth está desactivado)."""
