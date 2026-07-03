@@ -59,6 +59,11 @@ class Seccion:
     # True = CLAS de 3h sin distribución definida (3-juntas vs 2+1): NO se programa hasta
     # que el usuario elija la distribución (no se adivina). Ver parser._estructura_bloques.
     distribucion_indefinida: bool = False
+    # Metadatos del Maestro para el Excel de salida (formato histórico Horario ING).
+    nrc: str = ""
+    area: str = ""
+    plan: str = ""
+    conector: str = ""
     bloques_asignados: list = field(default_factory=list)
 
 

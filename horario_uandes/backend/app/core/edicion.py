@@ -97,8 +97,11 @@ def conflictos_de_seccion(
     bloques = asig[sec_id]
     conf: list[dict] = []
 
-    def _add(tipo, motivo):
-        conf.append({"tipo": tipo, "motivo": motivo})
+    def _add(tipo, motivo, *otras):
+        # 'secciones' = todas las secciones involucradas (esta + las otras en conflicto),
+        # para deduplicar a nivel global y resaltar en la UI.
+        conf.append({"tipo": tipo, "motivo": motivo,
+                     "secciones": [sec_id, *[o for o in otras if o]]})
 
     # intra-sección: los bloques de la sección se solapan entre sí
     for i in range(len(bloques)):
@@ -156,19 +159,19 @@ def conflictos_de_seccion(
         )
         # NRC — componentes distintos de la MISMA sección no se solapan
         if mismo_curso_secc and os_.componente != s.componente:
-            _add("NRC", f"Choca con {oid} (otro componente de la misma sección).")
+            _add("NRC", f"Choca con {oid} (otro componente de la misma sección).", oid)
             continue
 
         # RD1 — topes de malla (cursos distintos, misma carrera+semestre)
         if os_.codigo_curso != s.codigo_curso and _comparten_malla(datos, s, os_):
-            _add("RD1", f"Tope de malla con {oid} (mismo semestre en la malla).")
+            _add("RD1", f"Tope de malla con {oid} (mismo semestre en la malla).", oid)
 
         # RD3 — profesor compartido en dos secciones a la vez (incluye prof 2)
         if os_.codigo_curso != s.codigo_curso:
             compartidos = _profs_afectan(s) & _profs_afectan(os_)
             for rut in compartidos:
                 _add("RD3", f"El profesor {_prof_nombre(datos, rut)} ya está en "
-                            f"{oid} a esa hora.")
+                            f"{oid} a esa hora.", oid)
 
         # RD4 — misma sala especial
         if sala_s and os_.componente != TipoReunion.AYUD:
@@ -186,9 +189,31 @@ def conflictos_de_seccion(
         for b, otros in salas_conteo.items():
             if 1 + len(otros) > cap:
                 _add("RD4", f"Sala {sala_s} sobre capacidad ({cap}) en {_bloque_str(b)}: "
-                            f"compite con {', '.join(otros)}.")
+                            f"compite con {', '.join(otros)}.", *otros)
 
     return conf
+
+
+# ---------------------------------------------------------------------------
+# Validación global (para el panel de conflictos activos)
+# ---------------------------------------------------------------------------
+
+def validar_asignacion(datos: DatosProblema, asig: dict[str, list[int]]) -> list[dict]:
+    """
+    Lista TODOS los conflictos duros vigentes en la asignación, deduplicados (cada conflicto
+    una sola vez, aunque involucre a dos secciones). Base del panel de "conflictos activos".
+    """
+    vistos: set = set()
+    out: list[dict] = []
+    for sid in asig:
+        for c in conflictos_de_seccion(datos, asig, sid):
+            clave = (c["tipo"], frozenset(c["secciones"]),
+                     c["motivo"] if c["tipo"] in ("intra", "RD2", "RD6", "RD7", "RD8") else "")
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            out.append(c)
+    return out
 
 
 # ---------------------------------------------------------------------------

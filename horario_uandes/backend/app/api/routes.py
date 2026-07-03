@@ -25,7 +25,7 @@ from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
 from ..core.parser import cargar_datos, _estructura_bloques
 from ..core.diagnostico import diagnosticar
-from ..core.edicion import aplicar_movimiento, bloques_validos
+from ..core.edicion import aplicar_movimiento, bloques_validos, validar_asignacion
 from ..core.reporter import generar_reporte_detallado
 from ..core.solver_cpsat import resolver_por_partes
 from ..core.solver_ga import (
@@ -40,6 +40,7 @@ from ..schemas.solve import (
     BloquesValidosRequest,
     BloquesValidosResponse,
     BloqueValido,
+    ConflictoActivo,
     ConflictoItem,
     DecisionRequest,
     DecisionSeccion,
@@ -573,6 +574,19 @@ def editar_mover(req: MoverRequest):
         seccion=seccion,
         conflictos=[ConflictoItem(**c) for c in conflictos],
     )
+
+
+@router.get("/conflictos", response_model=list[ConflictoActivo])
+def get_conflictos():
+    """
+    Lista todos los conflictos duros vigentes en el horario actual (deduplicados). Base del
+    panel de 'conflictos activos': se refresca tras cada edición para que el usuario no pierda
+    de vista ningún tope que haya dejado. Lista vacía si no hay horario o no hay conflictos.
+    """
+    if _state["status"] != "ready" or not _state["asignaciones"]:
+        return []
+    conflictos = validar_asignacion(_state["datos"], _state["asignaciones"])
+    return [ConflictoActivo(**c) for c in conflictos]
 
 
 @router.post("/decisiones/distribucion", response_model=list[DecisionSeccion])

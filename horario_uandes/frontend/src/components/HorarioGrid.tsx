@@ -1,9 +1,9 @@
-import { useState, useMemo } from 'react'
-import { Search, X, Move, Check, AlertTriangle, Loader2 } from 'lucide-react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
+import { Search, X, Move, Check, AlertTriangle, Loader2, ShieldCheck } from 'lucide-react'
 import type {
-  SeccionAsignada, TipoSeccion, Dia, BloqueValido, ConflictoItem,
+  SeccionAsignada, TipoSeccion, Dia, BloqueValido, ConflictoItem, ConflictoActivo,
 } from '../types'
-import { getBloquesValidos, postMover } from '../api/client'
+import { getBloquesValidos, postMover, getConflictos } from '../api/client'
 
 // ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -217,10 +217,25 @@ export default function HorarioGrid({ secciones, onEdited }: Props) {
     carrera: '', semestre: '', tipo: '', texto: '',
   })
   const [selected, setSelected] = useState<SeccionAsignada | null>(null)
+  const [conflictos, setConflictos] = useState<ConflictoActivo[]>([])
+
+  const refrescarConflictos = useCallback(async () => {
+    try {
+      setConflictos(await getConflictos())
+    } catch {
+      /* ignora errores transitorios */
+    }
+  }, [])
+
+  // Cargar conflictos al montar y cada vez que cambia el horario (regenerar/refetch).
+  useEffect(() => {
+    refrescarConflictos()
+  }, [refrescarConflictos, secciones])
 
   async function handleMoved(sec: SeccionAsignada) {
     setSelected(sec)               // reflejar la nueva ubicación en el detalle
     if (onEdited) await onEdited()  // refrescar horario/reporte en el padre
+    await refrescarConflictos()     // actualizar el panel de conflictos activos
   }
 
   const availableSems = useMemo(() => {
@@ -242,8 +257,22 @@ export default function HorarioGrid({ secciones, onEdited }: Props) {
 
   const bodyHeight = SUB_BLOQUES.length * ROW_H
 
+  const seccionPorId = useMemo(
+    () => new Map(secciones.map(s => [s.id, s])),
+    [secciones],
+  )
+
   return (
     <div className="flex flex-col gap-5">
+
+      {/* ── Conflictos activos (persistente) ──────────────────────────────── */}
+      <ConflictosActivos
+        conflictos={conflictos}
+        onSelectSeccion={(id) => {
+          const s = seccionPorId.get(id)
+          if (s) setSelected(s)
+        }}
+      />
 
       {/* ── Filtros ────────────────────────────────────────────────────────── */}
       <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
@@ -436,46 +465,44 @@ function GroupBlock({
   selected: SeccionAsignada | null
   onSelect: (sec: SeccionAsignada | null) => void
 }) {
-  const tipo = group[0].tipo
-
+  // Cada sección apilada se colorea por SU propio tipo (una CLAS y una AYUD del mismo
+  // curso en el mismo bloque deben verse distintas), con un chip de tipo para no depender
+  // solo del color.
   return (
-    <div className={`h-full rounded overflow-y-auto flex flex-col ${TIPO_CARD[tipo]}`}>
+    <div className="h-full rounded overflow-y-auto flex flex-col bg-white border border-gray-200">
       {group.map((sec, idx) => (
         <button
           key={sec.id}
           onClick={() => onSelect(sec === selected ? null : sec)}
           className={`w-full text-left px-1.5 py-1 text-xs transition-all shrink-0
-            ${idx > 0 ? `border-t ${TIPO_DIVIDER[tipo]}` : ''}
+            ${TIPO_CARD[sec.tipo]}
+            ${idx > 0 ? `border-t ${TIPO_DIVIDER[sec.tipo]}` : ''}
             ${selected?.id === sec.id
               ? 'ring-1 ring-inset ring-gray-400 shadow-sm'
               : 'hover:brightness-95'
             }
           `}
         >
-          {idx === 0 ? (
-            <>
-              <span className="font-semibold block truncate leading-tight">
-                {sec.codigo}-{sec.seccion}
-              </span>
-              <span className="block truncate text-[10px] opacity-75 leading-tight">
-                {sec.titulo}
-              </span>
-              <span className="block truncate text-[10px] opacity-55 leading-tight">
-                {sec.profesor}
-              </span>
-              <span className="block text-[10px] opacity-50 mt-0.5 leading-tight">
-                ┄&nbsp;{group.length} secciones paralelas
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="font-semibold block truncate leading-tight">
-                {sec.codigo}-{sec.seccion}
-              </span>
-              <span className="block truncate text-[10px] opacity-55 leading-tight">
-                {sec.profesor}
-              </span>
-            </>
+          <span className="flex items-center gap-1 leading-tight">
+            <span className="font-semibold truncate">
+              {sec.codigo}-{sec.seccion}
+            </span>
+            <span className={`text-[8px] font-bold px-1 py-px rounded shrink-0 ${TIPO_TAG[sec.tipo]}`}>
+              {sec.tipo}
+            </span>
+          </span>
+          {idx === 0 && (
+            <span className="block truncate text-[10px] opacity-75 leading-tight">
+              {sec.titulo}
+            </span>
+          )}
+          <span className="block truncate text-[10px] opacity-55 leading-tight">
+            {sec.profesor}
+          </span>
+          {idx === 0 && (
+            <span className="block text-[10px] opacity-50 mt-0.5 leading-tight">
+              ┄&nbsp;{group.length} en este bloque
+            </span>
           )}
         </button>
       ))}
@@ -778,6 +805,90 @@ function Field({ label, value }: { label: string; value: string }) {
     <div>
       <p className="text-xs text-gray-400 font-medium">{label}</p>
       <p className="text-sm text-gray-800 mt-0.5">{value}</p>
+    </div>
+  )
+}
+
+// ── Panel de conflictos activos ─────────────────────────────────────────────────
+// Persistente: lista todos los topes duros vigentes en el horario editado. Se refresca
+// tras cada movimiento; los resueltos desaparecen. Así el usuario hace cambios múltiples
+// sin perder de vista ningún tope.
+
+const CONFLICTO_LABEL: Record<string, string> = {
+  RD1: 'Tope de malla',
+  RD2: 'Disponibilidad de profesor',
+  RD3: 'Profesor duplicado',
+  RD4: 'Sala especial saturada',
+  RD6: 'Duración de bloque',
+  RD7: 'Ayudantía antes de 12:30',
+  RD8: 'Horario protegido de minor',
+  NRC: 'Componentes de la sección',
+  intra: 'Solape interno de la sección',
+}
+
+function ConflictosActivos({
+  conflictos, onSelectSeccion,
+}: {
+  conflictos: ConflictoActivo[]
+  onSelectSeccion: (id: string) => void
+}) {
+  const [abierto, setAbierto] = useState(true)
+
+  if (conflictos.length === 0) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-green-700 bg-green-50
+                      border border-green-200 rounded-lg px-4 py-2.5">
+        <ShieldCheck size={15} className="shrink-0" />
+        Sin conflictos activos en el horario.
+      </div>
+    )
+  }
+
+  return (
+    <div className="border border-red-200 rounded-lg overflow-hidden">
+      <button
+        onClick={() => setAbierto(!abierto)}
+        className="w-full flex items-center justify-between px-4 py-2.5 bg-red-50
+                   hover:bg-red-100 transition-colors"
+      >
+        <span className="flex items-center gap-2 text-sm font-semibold text-red-800">
+          <AlertTriangle size={15} />
+          {conflictos.length} conflicto{conflictos.length !== 1 ? 's' : ''} activo
+          {conflictos.length !== 1 ? 's' : ''}
+        </span>
+        <span className="text-[11px] text-red-600">
+          {abierto ? 'ocultar' : 'ver'}
+        </span>
+      </button>
+
+      {abierto && (
+        <ul className="divide-y divide-red-100 bg-white max-h-64 overflow-y-auto">
+          {conflictos.map((c, i) => (
+            <li key={i} className="px-4 py-2.5">
+              <div className="flex items-start gap-2">
+                <span className="text-[10px] font-bold bg-red-100 text-red-700 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
+                  {CONFLICTO_LABEL[c.tipo] ?? c.tipo}
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs text-gray-800 leading-relaxed">{c.motivo}</p>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {c.secciones.map((sid) => (
+                      <button
+                        key={sid}
+                        onClick={() => onSelectSeccion(sid)}
+                        className="text-[10px] font-medium bg-gray-100 hover:bg-gray-200
+                                   text-gray-600 px-1.5 py-0.5 rounded transition-colors"
+                      >
+                        {sid}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

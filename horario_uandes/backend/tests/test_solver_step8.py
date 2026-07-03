@@ -88,50 +88,31 @@ def test_step8(datos):
     sheet_names = wb.sheetnames
     print(f"\n  Hojas generadas: {sheet_names}")
 
-    expected_sheets = ["Horario"] + _CARRERAS + ["Métricas"]
-    for sh in expected_sheets:
-        check(sh in sheet_names, f"Hoja '{sh}' presente en el Excel")
+    # Formato del cliente (idéntico al histórico): hoja única "HORARIO ING",
+    # encabezado en la fila 14, una fila por (sección, bloque).
+    check("HORARIO ING" in sheet_names, "Hoja 'HORARIO ING' presente en el Excel")
+    ws = wb["HORARIO ING"]
 
-    # 6. Sheet "Horario": filas de datos = secciones asignadas
-    ws_horario = wb["Horario"]
-    data_rows = ws_horario.max_row - 1    # -1 porque la fila 1 es header
+    # 6. Encabezado en la fila 14 con las columnas del formato histórico
+    header = [ws.cell(row=14, column=c).value for c in range(1, 20)]
+    for col in ("AREA", "NRC", "TITULO", "Lunes", "TIPO DE REUNION", "PROFESOR"):
+        check(col in header, f"Encabezado (fila 14) tiene columna '{col}'")
+
+    # 7. Una fila de datos por (sección, bloque)
+    n_bloques = sum(len(b) for b in asignaciones.values())
+    data_rows = ws.max_row - 14
     check(
-        data_rows == n_secciones,
-        f"Hoja 'Horario': {data_rows} filas de datos == {n_secciones} secciones asignadas",
+        data_rows == n_bloques,
+        f"Filas de datos == bloques asignados ({data_rows} == {n_bloques})",
     )
 
-    # 7. El bloque 13:30-15:20 aparece en el Excel (validación de bloque fix)
+    # 8. El bloque 13:30 aparece en alguna celda de día
     valores_celdas = set()
-    for row in ws_horario.iter_rows(min_row=2, values_only=True):
+    for row in ws.iter_rows(min_row=15, values_only=True):
         for cell in row:
             if isinstance(cell, str):
                 valores_celdas.add(cell)
-
-    bloques_13_30 = [b for b in TODOS_BLOQUES if b.hora_inicio == "13:30"]
-    check(len(bloques_13_30) > 0, "Existen bloques 13:30 en el catálogo")
-    tiene_13_30 = any("13:30" in v for v in valores_celdas)
-    check(tiene_13_30, "El bloque 13:30 aparece en la hoja 'Horario'")
-
-    # 8. Los bloques helper (ej. 12:30-14:20) ahora SON válidos: rellenan los huecos del
-    #    catálogo cuando la disponibilidad del profesor lo exige. Ya no se prohíben.
-
-    # 9. Sheet por carrera: existe siempre; tiene contenido solo si hay cursos de esa carrera
-    for carrera in _CARRERAS:
-        check(carrera in sheet_names, f"Hoja '{carrera}' presente en el Excel")
-        tiene_cursos = any(
-            carrera in c.semestres_por_carrera
-            for c in datos.cursos.values()
-        )
-        ws_c = wb[carrera]
-        n_rows = ws_c.max_row
-        if tiene_cursos:
-            check(n_rows >= 3, f"Hoja '{carrera}': tiene contenido (≥3 filas)")
-        else:
-            print(f"    [INFO] Hoja '{carrera}': sin cursos en datos actuales — hoja vacía OK")
-
-    # 10. Sheet "Métricas": tiene datos
-    ws_m = wb["Métricas"]
-    check(ws_m.max_row >= 5, "Hoja 'Métricas': tiene contenido (≥5 filas)")
+    check(any("13:30" in v for v in valores_celdas), "El bloque 13:30 aparece en la hoja")
 
     print(f"\n  Archivo guardado en: {OUTPUT_FILE}")
     print(f"  Tamaño: {OUTPUT_FILE.stat().st_size:,} bytes")

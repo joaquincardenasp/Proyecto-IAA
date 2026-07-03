@@ -153,8 +153,7 @@ def test_step9():
     # Validar que el xlsx es abrible
     import io
     wb = openpyxl.load_workbook(io.BytesIO(r.content))
-    check("Horario" in wb.sheetnames, "Excel contiene hoja 'Horario'")
-    check("Métricas" in wb.sheetnames, "Excel contiene hoja 'Métricas'")
+    check("HORARIO ING" in wb.sheetnames, "Excel contiene hoja 'HORARIO ING' (formato cliente)")
     print(f"  Excel válido, hojas: {wb.sheetnames}")
 
     # 10. Re-lanzar solve desde "ready" → 202 (se puede relanzar)

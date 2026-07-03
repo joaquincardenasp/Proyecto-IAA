@@ -168,6 +168,12 @@ class ConflictoItem(BaseModel):
     motivo: str
 
 
+class ConflictoActivo(BaseModel):
+    tipo: str                   # "RD1" | "RD3" | ... | "intra" | "NRC"
+    motivo: str
+    secciones: list[str]        # ids de las secciones involucradas
+
+
 class MoverRequest(BaseModel):
     sec_id: str
     indice: int

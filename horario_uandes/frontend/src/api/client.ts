@@ -4,6 +4,7 @@ import type {
   BloquesValidosResponse,
   MoverResponse,
   DecisionSeccion,
+  ConflictoActivo,
 } from '../types'
 
 // En desarrollo: BASE = '/api'  →  Vite proxea a http://localhost:8000/api
@@ -94,5 +95,11 @@ export const setDistribucion = (secId: string, opcion: string) =>
   _postDecision('distribucion', secId, opcion)
 export const setDuracion = (secId: string, opcion: string) =>
   _postDecision('duracion', secId, opcion)
+
+export async function getConflictos(): Promise<ConflictoActivo[]> {
+  const r = await fetch(`${BASE}/conflictos`)
+  if (!r.ok) return []
+  return r.json()
+}
 
 export const EXPORT_URL = `${BASE}/export`

@@ -147,6 +147,10 @@ def _mapear_columnas(df: pd.DataFrame) -> dict[str, Optional[str]]:
         "NOMBRE_LABT":  buscar("nombre profesor labt", "profesor labt"),
         # Distribución de bloques
         "DISTRIBUCION": buscar("2+1 o 3?", "2+1 o 3"),
+        # Metadatos para el Excel de salida (formato histórico)
+        "AREA":         buscar("area"),
+        "NRC":          buscar("nrc"),
+        "CONECTOR":     buscar("conector de liga", "conector liga"),
         # NOTA: las columnas LUNES-VIERNES del Maestro NO se mapean aquí: la disponibilidad
         # se lee de las hojas PROFESORES / RESPUESTAS / DisponibilidadesFueraForms.
     }
@@ -656,6 +660,11 @@ def _leer_maestro(
         titulo       = _str(_get(row, cols["TITULO"]))
         seccion_id   = _normalizar_seccion_id(_get(row, cols["SECCIONES"]))
         plan_estudio = _str(_get(row, cols["PLAN"])) or "desconocido"
+        # Metadatos para el Excel de salida (formato histórico)
+        area_val     = _str(_get(row, cols["AREA"])) if cols.get("AREA") else ""
+        nrc_val      = _str(_get(row, cols["NRC"])) if cols.get("NRC") else ""
+        conector_val = _str(_get(row, cols["CONECTOR"])) if cols.get("CONECTOR") else ""
+        meta = dict(nrc=nrc_val, area=area_val, plan=plan_estudio, conector=conector_val)
 
         # ── Semestres (regla Plan Común vs especialidad) ───────────────────
         pc = _parse_semestre(_get(row, cols["PC"]))
@@ -765,6 +774,7 @@ def _leer_maestro(
                     tipos_bloques_necesarios=est["tipos"],
                     duracion_bloque=est["duracion"],
                     distribucion_indefinida=est["indefinida"],
+                    **meta,
                 ))
                 if est["aviso"]:
                     advertencias.append(_msg_aviso_estructura(sec_id, est["aviso"], clas_h))
@@ -784,6 +794,7 @@ def _leer_maestro(
                     afecta_disponibilidad=False,  # AYUD nunca afecta disponibilidad
                     cantidad_bloques_necesarios=est["cantidad"],
                     duracion_bloque=est["duracion"],
+                    **meta,
                 ))
                 if est["aviso"]:
                     advertencias.append(_msg_aviso_estructura(sec_id, est["aviso"], ayud_h))
@@ -811,6 +822,7 @@ def _leer_maestro(
                     afecta_disponibilidad=afecta_lab,
                     cantidad_bloques_necesarios=est["cantidad"],
                     duracion_bloque=est["duracion"],
+                    **meta,
                 ))
                 if est["aviso"]:
                     advertencias.append(_msg_aviso_estructura(sec_id, est["aviso"], lab_h))

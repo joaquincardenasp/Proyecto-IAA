@@ -306,6 +306,7 @@ el resto no cambia). No bloquea el movimiento: informa los conflictos y el usuar
 | GET | `/report` | Solo el reporte de violaciones. |
 | POST | `/editar/bloques-validos` | Candidatos verde/rojo para mover un bloque. |
 | POST | `/editar/mover` | Aplica el movimiento, revalida y regenera reporte + Excel. |
+| GET | `/conflictos` | Lista todos los conflictos duros vigentes (deduplicados) para el panel de conflictos activos. |
 | POST | `/decisiones/distribucion` | Registra la distribución de una CLAS de 3h ("3-juntas"/"2+1"); se aplica al regenerar. |
 | POST | `/decisiones/duracion` | Registra la duración de un componente de 1h ("1h"/"2h"). |
 | GET | `/export` | Descarga el `.xlsx` generado. |

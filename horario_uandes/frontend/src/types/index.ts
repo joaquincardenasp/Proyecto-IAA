@@ -146,6 +146,12 @@ export interface MoverResponse {
   conflictos: ConflictoItem[]
 }
 
+export interface ConflictoActivo {
+  tipo: string
+  motivo: string
+  secciones: string[]
+}
+
 export interface SolveParams {
   carreras: string[]
   n_generaciones: number
