@@ -216,22 +216,12 @@ Google Cloud (OAuth) están detallados en el **Manual de Instalación y Desplieg
 - **Cumplimiento de restricciones blandas (TCRB):** ~13 % de bloques con alguna violación
   blanda en promedio (objetivo < 28 %).
 
-## Documentación adicional
-
-En `horario_uandes/docs/` se encuentran los documentos completos del proyecto:
-
-- **Informe ejecutivo final** — contexto, solución, KPIs y conclusiones.
-- **Manual de usuario** — guía detallada de la interfaz web.
-- **Manual de instalación y despliegue** — instalación, variables de entorno y puesta en
-  producción reproducible.
-
 ## Autores y contacto
 
 **Grupo 17 — IA Aplicada, Universidad de los Andes**
 
 - Joaquín Cárdenas
 - Matías De la Sotta
-- Pablo Moyano
 
 Ante cualquier duda o consulta sobre el proyecto, contactar a
 **[jicardenas@miuandes.cl](mailto:jicardenas@miuandes.cl)**.
