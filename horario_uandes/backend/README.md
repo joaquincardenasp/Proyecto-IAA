@@ -44,7 +44,7 @@ Solo se procesan las filas con **`CURSO MANDANTE` = "SI"**. Por cada fila:
 | Código de curso | `CODIGO` | string |
 | Sección | `SECCIONES` | `1.0` → `"1"`, letras tal cual |
 | Plan de estudio | `PLAN DE ESTUDIO` | usado para acumular semestres |
-| Semestre malla | `Plan Común`, o `ICI/IOC/ICE/ICC/ICA` | si `Plan Común` tiene valor se usa **solo** esa; si no, las de carrera. Se preservan sufijos de mención ("9a") |
+| Semestre malla | `Plan Común`, o `ICI/IOC/ICE/ICC/ICA` | si `Plan Común` tiene valor se usa esa. **Sem 1-4**: solo Plan Común. **Sem 5+**: además se expande a todas las especialidades del mismo número de semestre (los cursan todos los alumnos → RD1 contra todo ese semestre). Si no hay Plan Común, se usan las de carrera. Se preservan sufijos de mención ("9a") |
 | Horas a programar | `Clases A PROGRAMAR`, `Ayudantías PROGRAMAR`, `Laboratorios o Talleres PROGRAMAR` | enteros (se usan estas, **no** las regulares) |
 | Distribución | `2+1 o 3?` | `"3"/"3-juntas"` → 1 bloque de 3h; `"2+1"` → 1 bloque de 2h + 1 de 1h; resto → `ceil(horas/2)` bloques de 2h |
 | Profesor cátedra | `RUT PROFESOR 1` | normalizado (sin puntos/espacios) |
@@ -123,12 +123,12 @@ Profesor(rut, nombre, tipo {JORNADA|HONORARIO}, disponibilidad: set[bloque_idx])
 
 ### 1.6 Catálogo de bloques (`blocks.py`)
 
-145 bloques = **29 tipos × 5 días**. Cada bloque tiene `sub_bloques` (slots de 50 min).
+150 bloques = **30 tipos × 5 días**. Cada bloque tiene `sub_bloques` (slots de 50 min).
 Dos bloques **se solapan** si son del mismo día y comparten ≥1 sub-bloque
 (`MATRIZ_SOLAPAMIENTO`), **no** por igualdad de índice.
 
 - **Tipos estándar** (`es_estandar=True`): 5 de 2h (8:30, 10:30, 13:30, 15:30, 17:30),
-  2 de 3h (10:30-13:20, 12:30-15:20) y 10 de 1h (8:30-9:20 … 17:30-18:20). Es la grilla
+  2 de 3h (10:30-13:20, 12:30-15:20) y 11 de 1h (8:30-9:20 … 18:30-19:20). Es la grilla
   institucional preferida.
 - **Tipos "helper"** (`es_estandar=False`): 5 de 2h + 7 de 3h que rellenan los huecos
   (inicios 9:30, 11:30, 12:30, 14:30, 16:30 y 3h de mañana/tarde/noche) para que cualquier
@@ -146,14 +146,15 @@ mismo curso donde la disponibilidad lo permite. No hay agrupación previa.
 
 | ID | Qué verifica | Estado / detalle |
 |----|--------------|------------------|
-| **RD2 — Disponibilidad de profesor** | Cada sección solo puede ir en bloques donde su profesor está disponible. | **Activa y dura.** Implementada como el **dominio** de cada variable (`disponibilidad_seccion`). JORNADA = todos los bloques de su duración; HONORARIO = sus bloques declarados. **Se respeta por completo**: si no hay bloque válido, el modelo es INFEASIBLE. |
+| **RD2 — Disponibilidad de profesor** | Cada sección solo puede ir en bloques donde su(s) profesor(es) está(n) disponible(s). | **Activa y dura.** Implementada como el **dominio** de cada variable (`disponibilidad_seccion`). JORNADA = todos los bloques de su duración; HONORARIO = sus bloques declarados. Si la sección tiene **profesor 2** (co-dictante de CLAS), el dominio se intersecta también con su disponibilidad. **Se respeta por completo**: si no hay bloque válido, el modelo es INFEASIBLE. |
 | **RD6 — Duración del bloque** | Una sección solo usa bloques cuyo tipo (2h/3h) coincide con su `duracion_bloque`. Una clase de 2h no puede caer en un bloque de 3h ni viceversa. | **Activa y dura.** Implementada en el **dominio** (`disponibilidad_seccion` filtra por `TODOS_BLOQUES[b].tipo == s.duracion_bloque`). Solo las clases "3-juntas"/de 3h usan bloques de 3h. |
 | **Intra-sección** | Los bloques de una misma sección no se solapan entre sí. | Activa. |
 | **NRC — Componentes de la misma sección** | CLAS-k, AYUD-k y LABT-k de la **misma sección** (mismo NRC) no se solapan (el alumno asiste a los tres). | Activa. Se agrupa por `(codigo, seccion)`. |
 | **RD1 — Sin topes de malla** | Secciones de **cursos distintos** del mismo `(carrera, semestre)` no se solapan. | Activa y dura. Secciones del **mismo** curso quedan exentas (pueden ir paralelas). |
-| **RD3 — Unicidad de profesor** | Un profesor con `afecta_disponibilidad=True` no dicta dos secciones a la vez, **en cualquier rol** y curso. | Activa. Incluye: dos LABT del mismo curso con la misma profesora; un profesor que dicta LABT de un curso y CLAS de otro. **El profesor de laboratorio se trata como persona distinta** del de cátedra (cada sección usa su profesor real). AYUD no entra (la dicta un TA). |
+| **RD3 — Unicidad de profesor** | Un profesor con `afecta_disponibilidad=True` no dicta dos secciones a la vez, **en cualquier rol** y curso. | Activa. Incluye: dos LABT del mismo curso con la misma profesora; un profesor que dicta LABT de un curso y CLAS de otro. **El profesor de laboratorio se trata como persona distinta** del de cátedra (cada sección usa su profesor real). El **profesor 2** co-dictante también entra (no puede estar en dos secciones a la vez). AYUD no entra (la dicta un TA). |
 | **RD4 — Capacidad de salas especiales** | En cada instante (sub-bloque), la cantidad de secciones que usan un mismo tipo de sala no supera las salas físicas disponibles. | Activa. **Capacidad = 1** → ningún par puede solaparse (incluye mismo curso). **Capacidad > 1** → suma por sub-bloque ≤ capacidad (ej. LABT COMPUTACION: hasta 4 en paralelo). Se cuenta por **sub-bloque**, así que bloques distintos que se solapan (ej. 10:30-13:20 y 12:30-15:20) también compiten por la sala. AYUD excluida. |
 | **RD7 — Ayudantías desde 12:30** | Los bloques de AYUD inician a las 12:30 o después. | Activa, implementada en el **dominio** de las secciones AYUD. |
+| **RD8 — Horarios protegidos de minors** | Los cursos de semestre **3, 4 o 5** no pueden ocupar los bloques que tocan las ventanas de minor: **Martes** 17:30-19:20, **Miércoles** 17:30-19:20, **Viernes** 10:30-12:20. | Activa, implementada en el **dominio** (`disponibilidad_seccion` excluye `BLOQUES_PROTEGIDOS_MINOR` para secciones de sem 3/4/5). Verificable con `verificar_minor`. |
 
 **Objetivo de optimización del CP-SAT:** minimizar el uso de bloques **helper**
 (no estándar). Las secciones sin datos de disponibilidad quedan restringidas a la grilla
@@ -303,3 +304,65 @@ el resto no cambia). No bloquea el movimiento: informa los conflictos y el usuar
 
 > **Nota:** la re-subida del Excel editado (revalidación por archivo) está **diferida**;
 > la edición se hace hoy con el flujo interactivo de §5.3.
+
+---
+
+## 6. Mejoras futuras
+
+Ideas de evolución, ordenadas por valor/impacto. Ninguna es requisito para el funcionamiento
+actual; se listan para no perder el contexto de decisiones ya analizadas.
+
+### 6.1 Maximización de colocación (reemplazar el greedy de `resolver_por_partes`)
+
+**Problema.** Hoy, cuando el modelo completo es INFEASIBLE, `resolver_por_partes` descompone
+en unidades `(carrera, semestre)` y las resuelve **greedy incremental** (orden fijo, fijando
+lo previo). Ese greedy no es óptimo: puede dejar bloqueadas unidades que en realidad **sí
+caben** en una solución conjunta (falsos positivos), y el diagnóstico las reporta como
+"contención" cuando no hay conflicto real. (Se observó al colocar los cursos de Plan Común
+superior primero: encajonaban a especialidades que eran factibles.)
+
+**Propuesta.** Modelar la colocación como **óptimo global maximizando secciones colocadas**:
+cada sección lleva un booleano `colocada`; todas sus restricciones duras se aplican
+**solo si `colocada`** (reificación con `OnlyEnforceIf`); el objetivo es `Maximize(Σ colocada)`.
+El resultado coloca el **máximo real** y marca como bloqueadas **exactamente** las secciones
+imposibles (sin artefactos de orden). El diagnóstico gana precisión quirúrgica (señala la
+sección/dato exacto). Costo: modelo más grande y algo más lento; conviene medir tiempos.
+
+### 6.2 Diagnóstico Capa 3 — núcleo conflictivo mínimo
+
+Usar `model.AddAssumption()` + `solver.SufficientAssumptionsForInfeasibility()` de OR-Tools
+para obtener el **subconjunto mínimo** de restricciones/secciones que se contradicen, en vez
+de señalar la restricción a nivel de tipo (RD2/RD3/RD4) como hace la Capa 2. Da mensajes aún
+más accionables ("estas 3 secciones + este profesor son el conflicto exacto").
+
+### 6.3 Aviso de disponibilidad "huérfana" (lección del caso IOC3000)
+
+Un profesor puede declarar una franja de 50 min que **ningún bloque del catálogo puede usar**
+(p.ej. una franja suelta a las 18:30 cuando faltaba el bloque de 1h ahí). Hoy eso se descarta
+en silencio y puede volver INFEASIBLE todo el modelo sin señal clara. **Propuesta:** en el
+parser, avisar cuando un sub-bloque declarado por un profesor no cae en ningún bloque
+agendable, para que los problemas de datos/catálogo salgan a la luz temprano.
+
+### 6.4 Re-subida del Excel editado (Fase 5A, diferida)
+
+Parser inverso del horario exportado + endpoint que revalida las asignaciones editadas a mano
+y reporta qué duras se rompieron. Complementa la edición interactiva (§5.3) para quienes
+prefieran editar en Excel. Fue diferida por ser frágil (el usuario puede romper el formato).
+
+### 6.5 RD4 exacto en el GA
+
+El GA aproxima la capacidad de salas (RD4 > 1) con un grafo de conflictos binario (ver §4, limitación 5).
+Modelarla exactamente por sub-bloque evitaría que un movimiento del GA exceda capacidad entre
+secciones del mismo curso (hoy solo lo garantiza el punto de partida de CP-SAT + el reporter).
+
+### 6.6 "Días distintos" como restricción dura configurable
+
+El intra-sección solo prohíbe **solape**; que dos bloques de una sección caigan el mismo día
+sin solaparse lo desalienta RB4 (blanda). Si el cliente lo exige, podría volverse dura
+(opcional por curso/componente).
+
+### 6.7 Persistencia y deshacer de las ediciones manuales
+
+Las ediciones "click-para-mover" viven en memoria (`_state`). Un despliegue real querría
+persistirlas, soportar **deshacer/historial**, y recomputar métricas (fitness) tras cada
+movimiento (hoy quedan algo desactualizadas respecto al horario editado).

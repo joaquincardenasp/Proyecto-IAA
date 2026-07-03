@@ -24,7 +24,11 @@ from .blocks import (
     TODOS_BLOQUES,
 )
 from .models import DatosProblema, TipoReunion
-from .solver_cpsat import disponibilidad_seccion
+from .solver_cpsat import (
+    BLOQUES_PROTEGIDOS_MINOR,
+    disponibilidad_seccion,
+    seccion_en_semestre_protegido,
+)
 
 _DIA_LABEL = {"L": "Lunes", "M": "Martes", "X": "Miércoles", "J": "Jueves", "V": "Viernes"}
 _MIN_12_30 = 12 * 60 + 30
@@ -125,6 +129,13 @@ def conflictos_de_seccion(
         if temprano:
             _add("RD7", f"Ayudantía antes de las 12:30 en "
                         f"{', '.join(_bloque_str(b) for b in temprano)}.")
+
+    # RD8 — horarios protegidos para minors (semestres 3/4/5)
+    if seccion_en_semestre_protegido(datos, s):
+        protegidos = [b for b in bloques if b in BLOQUES_PROTEGIDOS_MINOR]
+        if protegidos:
+            _add("RD8", f"Horario protegido para minors (sem. 3/4/5) en "
+                        f"{', '.join(_bloque_str(b) for b in protegidos)}.")
 
     # Conflictos por pares con el resto del horario
     salas_conteo: dict[int, list[str]] = {}  # para RD4 con capacidad > 1

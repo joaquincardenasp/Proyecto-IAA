@@ -41,12 +41,12 @@ def check(cond: bool, msg: str) -> None:
 def test_blocks() -> None:
     print("\n--- test_blocks ---")
 
-    # Catálogo: 29 tipos (2h/3h estándar + helper + 1h para 2+1) × 5 días = 145
-    check(N_BLOQUES == 145, f"145 bloques totales (hay {N_BLOQUES})")
+    # Catálogo: 30 tipos (2h/3h estándar + helper + 1h de 8:30 a 18:30) × 5 días = 150
+    check(N_BLOQUES == 150, f"150 bloques totales (hay {N_BLOQUES})")
 
-    # Estándar: 5 (2h) + 2 (3h) + 10 (1h) = 17 tipos × 5 días = 85
+    # Estándar: 5 (2h) + 2 (3h) + 11 (1h, 8:30–18:30) = 18 tipos × 5 días = 90
     estandar = [b for b in TODOS_BLOQUES if b.es_estandar]
-    check(len(estandar) == 85, f"85 bloques estándar (17 tipos × 5 días) (hay {len(estandar)})")
+    check(len(estandar) == 90, f"90 bloques estándar (18 tipos × 5 días) (hay {len(estandar)})")
 
     # Los bloques 3h ESTÁNDAR inician en 10:30 o 12:30; los helper rellenan otros inicios
     b3h_std = [b for b in TODOS_BLOQUES if b.tipo == "3h" and b.es_estandar]
@@ -243,17 +243,35 @@ def test_invariantes_cursos(datos) -> None:
                     f"{codigo} ({carrera}): semestre '{sem}' debe ser string",
                 )
 
-    # Cursos Plan Común NO tienen columnas de especialidad
+    # Regla Plan Común:
+    #   sem 1-4 → SIN columnas de especialidad (todas las carreras cursan lo mismo).
+    #   sem 5+  → expandido a TODAS las especialidades en el MISMO número de semestre
+    #             (los cursan todos los alumnos; deben no-topar con cualquier curso de ese
+    #             semestre). Ver _expandir_plan_comun_superior en parser.py.
+    def _num_sem(s: str) -> int:
+        d = "".join(ch for ch in str(s) if ch.isdigit())
+        return int(d) if d else -1
+
     for codigo, curso in datos.cursos.items():
-        if "Plan Común" in curso.semestres_por_carrera:
-            especialidades = [
-                c for c in curso.semestres_por_carrera
-                if c != "Plan Común"
-            ]
+        sems_pc = curso.semestres_por_carrera.get("Plan Común")
+        if not sems_pc:
+            continue
+        nums_pc = {_num_sem(s) for s in sems_pc}
+        especialidades = [c for c in curso.semestres_por_carrera if c != "Plan Común"]
+        if all(n <= 4 for n in nums_pc):
             check(
                 len(especialidades) == 0,
-                f"{codigo}: curso Plan Común no debe tener carreras de especialidad {especialidades}",
+                f"{codigo}: Plan Común sem 1-4 no debe tener especialidades {especialidades}",
             )
+        else:
+            nums_pc_sup = {n for n in nums_pc if n >= 5}
+            for c in especialidades:
+                for sem in curso.semestres_por_carrera[c]:
+                    check(
+                        _num_sem(sem) in nums_pc_sup,
+                        f"{codigo}: especialidad {c} sem '{sem}' debe coincidir con un "
+                        f"semestre Plan Común 5+ {sorted(nums_pc_sup)}",
+                    )
 
     # Sufijos de mención se preservan: si existen "9a" o "9f", no deben colapsar a "9"
     for codigo, curso in datos.cursos.items():

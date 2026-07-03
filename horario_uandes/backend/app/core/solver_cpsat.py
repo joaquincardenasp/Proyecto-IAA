@@ -139,6 +139,35 @@ _BLOQUES_PROHIBIDOS_AYUD: list[int] = [
     if _hora_a_min(b.hora_inicio) < _MIN_12_30
 ]
 
+# ── Horarios protegidos para minors (RD8) ───────────────────────────────────
+# Los alumnos de semestres 3, 4 y 5 toman minors en ventanas protegidas; ningún curso de
+# ingeniería de esos semestres puede ocupar un bloque que toque estas franjas de 50 min.
+SEMESTRES_PROTEGIDOS_MINOR: set[str] = {"3", "4", "5"}
+
+# (día → minutos de inicio de las franjas de 50 min protegidas)
+_MINOR_SUBS_POR_DIA: dict[str, set[int]] = {
+    "M": {17 * 60 + 30, 18 * 60 + 30},   # Martes 17:30-18:20 y 18:30-19:20
+    "X": {17 * 60 + 30, 18 * 60 + 30},   # Miércoles 17:30-18:20 y 18:30-19:20
+    "V": {10 * 60 + 30, 11 * 60 + 30},   # Viernes 10:30-11:20 y 11:30-12:20
+}
+
+# Un bloque está protegido si toca (comparte una franja de 50 min con) una ventana de minor.
+BLOQUES_PROTEGIDOS_MINOR: set[int] = {
+    i for i, b in enumerate(TODOS_BLOQUES)
+    if b.sub_bloques & _MINOR_SUBS_POR_DIA.get(b.dia.value, set())
+}
+
+
+def seccion_en_semestre_protegido(datos: DatosProblema, s) -> bool:
+    """True si el curso de la sección pertenece a semestre 3, 4 o 5 en alguna carrera."""
+    curso = datos.cursos.get(s.codigo_curso)
+    if not curso:
+        return False
+    return any(
+        sems & SEMESTRES_PROTEGIDOS_MINOR
+        for sems in curso.semestres_por_carrera.values()
+    )
+
 
 # ---------------------------------------------------------------------------
 # Disponibilidad de sección
@@ -182,6 +211,12 @@ def disponibilidad_seccion(
             prof = datos.profesores.get(rut)
             if prof and prof.disponibilidad:
                 base = {b for b in base if b in prof.disponibilidad}
+
+    # RD8: horarios protegidos para minors. Cursos de semestre 3/4/5 no pueden ocupar los
+    # bloques que tocan las ventanas de minor (Ma/Mi 17:30-19:20, Vi 10:30-12:20).
+    if seccion_en_semestre_protegido(datos, s):
+        base = {b for b in base if b not in BLOQUES_PROTEGIDOS_MINOR}
+
     return base
 
 
@@ -472,19 +507,36 @@ def _construir_unidades(datos: DatosProblema, secciones: list, carreras: list[st
     return unidades
 
 
-def _fijas_relevantes(datos, activas, asignaciones, sec_by_id, carrera, sem) -> set:
+def _cohortes(datos, s) -> set:
+    """Cohortes (carrera, semestre) a las que pertenece la sección (para RD1)."""
+    curso = datos.cursos.get(s.codigo_curso)
+    if not curso:
+        return set()
+    return {(c, se) for c, sems in curso.semestres_por_carrera.items() for se in sems}
+
+
+def _fijas_relevantes(datos, activas, asignaciones, sec_by_id) -> set:
     """
     Secciones ya colocadas que interactúan con las activas por una restricción dura que
-    cruza unidades: RD3 (mismo profesor), RD4 (misma sala especial) o RD1 (misma
-    carrera+semestre). Solo estas necesitan incluirse como fijadas en el modelo de la unidad.
+    cruza unidades: RD3 (profesor compartido, incluye prof 2), RD4 (misma sala especial) o
+    RD1 (comparten cohorte carrera+semestre). Se decide por **partnership real** entre las
+    secciones (no por la clave de la unidad actual): así, una sección que pertenece a varias
+    unidades queda correctamente restringida contra todas sus partners ya colocadas, aunque
+    su restricción compartida "viva" en otra unidad.
     """
-    profs = {s.rut_profesor for s in activas if s.afecta_disponibilidad and s.rut_profesor}
-    salas = set()
+    profs_act: set[str] = set()
+    salas_act: set = set()
+    cohortes_act: set = set()
     for s in activas:
+        if s.afecta_disponibilidad:
+            for rut in (s.rut_profesor, s.rut_profesor_2):
+                if rut:
+                    profs_act.add(rut)
         if s.componente != TipoReunion.AYUD:
             curso = datos.cursos.get(s.codigo_curso)
             if curso and curso.sala_especial:
-                salas.add(curso.sala_especial)
+                salas_act.add(curso.sala_especial)
+        cohortes_act |= _cohortes(datos, s)
 
     rel: set[str] = set()
     for sid in asignaciones:
@@ -492,16 +544,18 @@ def _fijas_relevantes(datos, activas, asignaciones, sec_by_id, carrera, sem) -> 
         if not fs:
             continue
         curso = datos.cursos.get(fs.codigo_curso)
-        # RD3: mismo profesor
-        if fs.afecta_disponibilidad and fs.rut_profesor in profs:
+        # RD3: profesor compartido (prof 1 o prof 2)
+        if fs.afecta_disponibilidad and (
+            fs.rut_profesor in profs_act or (fs.rut_profesor_2 and fs.rut_profesor_2 in profs_act)
+        ):
             rel.add(sid)
             continue
         # RD4: misma sala especial
-        if fs.componente != TipoReunion.AYUD and curso and curso.sala_especial in salas:
+        if fs.componente != TipoReunion.AYUD and curso and curso.sala_especial in salas_act:
             rel.add(sid)
             continue
-        # RD1: comparte (carrera, semestre) con la unidad actual
-        if curso and sem in curso.semestres_por_carrera.get(carrera, set()):
+        # RD1: comparte alguna cohorte (carrera, semestre) con alguna activa
+        if _cohortes(datos, fs) & cohortes_act:
             rel.add(sid)
     return rel
 
@@ -556,7 +610,7 @@ def resolver_por_partes(
         if not activas:
             continue  # ya colocadas en unidades previas (curso compartido)
 
-        fijas_rel = _fijas_relevantes(datos, activas, asignaciones, sec_by_id, carrera, sem)
+        fijas_rel = _fijas_relevantes(datos, activas, asignaciones, sec_by_id)
         r = resolver(
             datos,
             carreras=carreras,
@@ -722,6 +776,23 @@ def verificar_rd7(
             continue
         for b in bloques:
             if _hora_a_min(TODOS_BLOQUES[b].hora_inicio) < _MIN_12_30:
+                violaciones.append((sec_id, b))
+    return violaciones
+
+
+def verificar_minor(
+    datos: DatosProblema,
+    asignaciones: dict[str, list[int]],
+) -> list[tuple[str, int]]:
+    """Retorna (sec_id, bloque_idx) de cursos de sem 3/4/5 en un horario protegido de minor."""
+    sec_by_id = {s.id: s for s in datos.secciones}
+    violaciones = []
+    for sec_id, bloques in asignaciones.items():
+        s = sec_by_id.get(sec_id)
+        if not s or not seccion_en_semestre_protegido(datos, s):
+            continue
+        for b in bloques:
+            if b in BLOQUES_PROTEGIDOS_MINOR:
                 violaciones.append((sec_id, b))
     return violaciones
 

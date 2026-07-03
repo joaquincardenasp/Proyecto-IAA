@@ -67,6 +67,7 @@ _BLOQUES_DEF: list[tuple[str, str, str, bool]] = [
     ("15:30", "16:20", "1h", True),
     ("16:30", "17:20", "1h", True),
     ("17:30", "18:20", "1h", True),
+    ("18:30", "19:20", "1h", True),   # cierra el grid de 1h hasta el fin de jornada (19:20)
 ]
 
 BLOQUES_2H = [d for d in _BLOQUES_DEF if d[2] == "2h"]

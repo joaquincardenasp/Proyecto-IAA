@@ -560,6 +560,54 @@ def _leer_ruts_jornada(xl: pd.ExcelFile) -> set[str]:
 # Procesamiento de la hoja MAESTRO
 # ---------------------------------------------------------------------------
 
+_ESPECIALIDADES = ("ICI", "IOC", "ICE", "ICC", "ICA")
+
+
+def _num_semestre(sem: str) -> int:
+    """Número de semestre ignorando sufijos de mención ('10a' → 10). -1 si no hay dígitos."""
+    d = "".join(ch for ch in str(sem) if ch.isdigit())
+    return int(d) if d else -1
+
+
+def _expandir_plan_comun_superior(cursos: dict[str, Curso]) -> list[str]:
+    """
+    Los cursos de Plan Común de semestre 5+ los cursan TODOS los alumnos, sea cual sea su
+    especialidad (ej. Filosofía de las Ciencias en sem 5, Ética en sem 10). Por lo tanto
+    deben no-topar (RD1) con cualquier curso del mismo semestre de cualquier carrera.
+
+    Se implementa expandiendo `semestres_por_carrera`: se agrega el curso a cada
+    especialidad en TODOS los semestres cuyo número coincida (incluyendo tracks de mención,
+    p.ej. sem 10 cubre 10, 10a, 10f…). Así RD1 (CP-SAT, GA, reporter, edición) y el filtro
+    del frontend lo consideran automáticamente. Los cursos de Plan Común sem 1-4 no cambian.
+    """
+    labels_por_carrera: dict[str, set[str]] = {c: set() for c in _ESPECIALIDADES}
+    for cur in cursos.values():
+        for c in _ESPECIALIDADES:
+            labels_por_carrera[c].update(cur.semestres_por_carrera.get(c, set()))
+
+    avisos: list[str] = []
+    for cur in cursos.values():
+        sems_pc = cur.semestres_por_carrera.get("Plan Común")
+        if not sems_pc:
+            continue
+        for sem in sorted(sems_pc):
+            n = _num_semestre(sem)
+            if n < 5:
+                continue
+            añadidos: list[str] = []
+            for c in _ESPECIALIDADES:
+                for lbl in labels_por_carrera[c]:
+                    if _num_semestre(lbl) == n:
+                        cur.semestres_por_carrera.setdefault(c, set()).add(lbl)
+                        añadidos.append(f"{c}:{lbl}")
+            if añadidos:
+                avisos.append(
+                    f"[INFO] {cur.codigo} (Plan Común sem {sem}) → no-topa también con "
+                    f"{', '.join(sorted(añadidos))}"
+                )
+    return avisos
+
+
 def _leer_maestro(
     df: pd.DataFrame,
     cols: dict[str, Optional[str]],
@@ -751,6 +799,9 @@ def _leer_maestro(
                     cantidad_bloques_necesarios=_calcular_bloques(lab_h),
                     duracion_bloque=_duracion_bloque(lab_h),
                 ))
+
+    # Plan Común sem 5+ debe no-topar con todas las especialidades del mismo semestre.
+    advertencias.extend(_expandir_plan_comun_superior(cursos))
 
     for w in advertencias:
         print(w)
