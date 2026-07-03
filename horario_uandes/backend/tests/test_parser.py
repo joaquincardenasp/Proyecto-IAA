@@ -191,8 +191,9 @@ def test_invariantes_secciones(datos) -> None:
 
     # Todas las secciones tienen >= 1 bloque
     check(
-        all(s.cantidad_bloques_necesarios >= 1 for s in secciones),
-        "Todas las secciones tienen cantidad_bloques_necesarios >= 1",
+        all(s.cantidad_bloques_necesarios >= 1
+            for s in secciones if not s.distribucion_indefinida),
+        "Las secciones programables tienen cantidad_bloques_necesarios >= 1",
     )
 
     # id en formato "{codigo}-{seccion}-{componente}"
@@ -336,8 +337,9 @@ def test_horas_a_bloques(datos) -> None:
 
     # Ninguna sección puede tener 0 bloques
     check(
-        all(s.cantidad_bloques_necesarios >= 1 for s in secciones),
-        "Ninguna sección tiene cantidad_bloques_necesarios < 1",
+        all(s.cantidad_bloques_necesarios >= 1
+            for s in secciones if not s.distribucion_indefinida),
+        "Ninguna sección programable tiene cantidad_bloques_necesarios < 1",
     )
 
     # Hay secciones con más de 1 bloque (multi-bloque)

@@ -107,6 +107,20 @@ class DiagnosticoResult(BaseModel):
     unidades: list[DiagnosticoUnidadItem] = Field(default_factory=list)
 
 
+class DecisionSeccion(BaseModel):
+    """Una sección que requiere/admite una decisión estructural del usuario."""
+    sec_id: str
+    codigo: str
+    titulo: str
+    seccion: str
+    profesor: str
+    tipo: str                 # "distribucion" (3h sin definir) | "duracion_1h" (componente de 1h)
+    opciones: list[str]       # ["3-juntas", "2+1"] o ["1h", "2h"]
+    actual: str               # opción vigente ("" si indefinida)
+    requerida: bool           # True = bloquea la programación; False = ajuste opcional
+    mensaje: str
+
+
 class SolveResult(BaseModel):
     # FACTIBLE (horario completo) | PARCIAL (subconjunto + diagnóstico) | INFEASIBLE (solo diagnóstico)
     estado: str = "FACTIBLE"
@@ -114,6 +128,13 @@ class SolveResult(BaseModel):
     secciones: list[SeccionAsignada] = Field(default_factory=list)
     reporte: Optional[ReporteDetallado] = None
     diagnostico: Optional[DiagnosticoResult] = None
+    # Secciones que requieren decisión (distribución 3h) o admiten un ajuste (componente 1h).
+    decisiones: list[DecisionSeccion] = Field(default_factory=list)
+
+
+class DecisionRequest(BaseModel):
+    sec_id: str
+    opcion: str               # "3-juntas" | "2+1" (distribución) o "1h" | "2h" (duración)
 
 
 # ---------------------------------------------------------------------------

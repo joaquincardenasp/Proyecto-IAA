@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { AlertCircle, AlertTriangle, Check, Download, Loader2 } from "lucide-react";
-import { getStatus, getResults, EXPORT_URL } from "./api/client";
+import { getStatus, getResults, postSolve, EXPORT_URL } from "./api/client";
 import type { SolveResult, StatusResponse } from "./types";
 import SolverPanel from "./components/SolverPanel";
 import HorarioGrid from "./components/HorarioGrid";
 import MetricasPanel from "./components/MetricasPanel";
 import DiagnosticoPanel from "./components/DiagnosticoPanel";
+import DecisionesPanel from "./components/DecisionesPanel";
 
-type Tab = "solver" | "horario" | "metricas" | "diagnostico";
+type Tab = "solver" | "horario" | "metricas" | "diagnostico" | "decisiones";
 
 // ── Etapas del proceso ────────────────────────────────────────────────────────
 
@@ -88,11 +89,24 @@ export default function App() {
   const tieneDiagnostico = !!results?.diagnostico && results.diagnostico.unidades.length > 0;
   const nBloqueadas = results?.diagnostico?.unidades.length ?? 0;
 
+  const decisiones = results?.decisiones ?? [];
+  const nDecisionesPend = decisiones.filter((d) => d.requerida && !d.actual).length;
+
+  const regenerar = useCallback(async () => {
+    try {
+      await postSolve();
+      startPolling();
+    } catch (e) {
+      console.error("Regenerar error:", e);
+    }
+  }, [startPolling]);
+
   const TABS: { id: Tab; label: string; disabled?: boolean }[] = [
     { id: "solver", label: "Generar horario" },
     { id: "horario", label: "Horario", disabled: !tieneHorario },
     { id: "metricas", label: "Métricas", disabled: !results?.metricas },
     { id: "diagnostico", label: "Diagnóstico", disabled: !tieneDiagnostico },
+    { id: "decisiones", label: "Decisiones", disabled: decisiones.length === 0 },
   ];
 
   return (
@@ -174,6 +188,14 @@ export default function App() {
                                    px-1.5 py-0.5 rounded font-medium tabular-nums"
                   >
                     {nBloqueadas}
+                  </span>
+                )}
+                {t.id === "decisiones" && nDecisionesPend > 0 && (
+                  <span
+                    className="ml-2 text-[11px] bg-red-100 text-red-700
+                                   px-1.5 py-0.5 rounded font-medium tabular-nums"
+                  >
+                    {nDecisionesPend}
                   </span>
                 )}
               </button>
@@ -306,6 +328,26 @@ export default function App() {
         </div>
       )}
 
+      {/* ── Banner de decisiones pendientes ──────────────────────────────────── */}
+      {nDecisionesPend > 0 && status.status === "ready" && (
+        <div className="bg-red-50 border-b border-red-200 px-6 py-2.5 shrink-0">
+          <div className="max-w-screen-xl mx-auto flex items-center gap-2 text-sm text-red-700">
+            <AlertTriangle size={14} className="shrink-0" />
+            <span>
+              {nDecisionesPend} clase{nDecisionesPend !== 1 ? "s" : ""} de 3h sin distribución
+              definida — no se programan hasta decidir.{" "}
+              <button
+                onClick={() => setTab("decisiones")}
+                className="font-semibold underline underline-offset-2"
+              >
+                Resolver decisiones
+              </button>
+              .
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* ── Contenido ─────────────────────────────────────────────────────── */}
       <main className="flex-1 max-w-screen-xl mx-auto w-full px-6 py-8">
         {tab === "solver" && (
@@ -332,6 +374,13 @@ export default function App() {
             diagnostico={results.diagnostico}
             estado={results.estado}
             nColocadas={results.secciones.length}
+          />
+        )}
+        {tab === "decisiones" && decisiones.length > 0 && (
+          <DecisionesPanel
+            decisiones={decisiones}
+            onRegenerar={regenerar}
+            regenerando={isRunning}
           />
         )}
       </main>

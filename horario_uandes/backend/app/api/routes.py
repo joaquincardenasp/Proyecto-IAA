@@ -23,7 +23,7 @@ from fastapi.responses import Response
 from ..core.blocks import TODOS_BLOQUES
 from ..core.exporter import _CARRERAS, _sem_sort_key, exportar_horario
 from ..core.models import DatosProblema
-from ..core.parser import cargar_datos
+from ..core.parser import cargar_datos, _estructura_bloques
 from ..core.diagnostico import diagnosticar
 from ..core.edicion import aplicar_movimiento, bloques_validos
 from ..core.reporter import generar_reporte_detallado
@@ -41,6 +41,8 @@ from ..schemas.solve import (
     BloquesValidosResponse,
     BloqueValido,
     ConflictoItem,
+    DecisionRequest,
+    DecisionSeccion,
     DiagnosticoResult,
     DiagnosticoUnidadItem,
     MetricasResult,
@@ -77,6 +79,9 @@ _state: dict = {
     "diagnostico":             None,     # Diagnostico (dataclass) o None
     "excel_bytes":             None,     # bytes
     "datos":                   None,     # DatosProblema
+    # Decisiones del usuario sobre estructura de bloques (persisten entre regeneraciones):
+    "overrides":               {"distribucion": {}, "duracion": {}},
+    "decisiones_cand":         [],       # candidatos a decisión (del parse fresco)
 }
 _lock     = asyncio.Lock()
 _executor = ThreadPoolExecutor(max_workers=1)
@@ -90,10 +95,86 @@ def _set_progress(msg: str) -> None:
     _state["progress"] = msg
 
 
+# ---------------------------------------------------------------------------
+# Decisiones de estructura de bloques (distribución 3h / componente 1h)
+# ---------------------------------------------------------------------------
+
+def _candidatos_decision(datos: DatosProblema) -> list[dict]:
+    """
+    Secciones que requieren/admiten una decisión estructural, tomadas del parse FRESCO
+    (antes de aplicar overrides): CLAS de 3h sin distribución (requerida) y componentes de
+    1h (ajuste opcional a 2h).
+    """
+    cand: list[dict] = []
+    for s in datos.secciones:
+        curso = datos.cursos.get(s.codigo_curso)
+        info = dict(
+            sec_id=s.id, codigo=s.codigo_curso,
+            titulo=curso.titulo if curso else "", seccion=s.seccion,
+            profesor=(datos.profesores.get(s.rut_profesor).nombre
+                      if datos.profesores.get(s.rut_profesor) else s.rut_profesor) or "",
+        )
+        if s.distribucion_indefinida:
+            cand.append({**info, "tipo": "distribucion"})
+        elif s.duracion_bloque == "1h":
+            cand.append({**info, "tipo": "duracion_1h"})
+    return cand
+
+
+def _build_decisiones(candidatos: list[dict], overrides: dict) -> list[DecisionSeccion]:
+    """Arma la lista de DecisionSeccion combinando los candidatos con los overrides vigentes."""
+    ov_dist = overrides.get("distribucion", {})
+    ov_dur = overrides.get("duracion", {})
+    out: list[DecisionSeccion] = []
+    for c in candidatos:
+        if c["tipo"] == "distribucion":
+            out.append(DecisionSeccion(
+                **{k: c[k] for k in ("sec_id", "codigo", "titulo", "seccion", "profesor")},
+                tipo="distribucion", opciones=["3-juntas", "2+1"],
+                actual=ov_dist.get(c["sec_id"], ""), requerida=True,
+                mensaje=("Clase de 3h sin distribución definida. Elige cómo dictarla: "
+                         "'3-juntas' (un bloque de 3h) o '2+1' (un bloque de 2h + uno de 1h). "
+                         "Hasta entonces no se programa."),
+            ))
+        else:  # duracion_1h
+            out.append(DecisionSeccion(
+                **{k: c[k] for k in ("sec_id", "codigo", "titulo", "seccion", "profesor")},
+                tipo="duracion_1h", opciones=["1h", "2h"],
+                actual=ov_dur.get(c["sec_id"], "1h"), requerida=False,
+                mensaje=("Componente de 1 hora (inusual). Por defecto usa un bloque de 1h; "
+                         "puedes cambiarlo a un bloque de 2h si corresponde."),
+            ))
+    return out
+
+
+def _aplicar_overrides(datos: DatosProblema, overrides: dict) -> None:
+    """Aplica las decisiones del usuario sobre las secciones (in-place) antes de resolver."""
+    sec_by_id = {s.id: s for s in datos.secciones}
+    for sid, opcion in overrides.get("distribucion", {}).items():
+        s = sec_by_id.get(sid)
+        if not s or opcion not in ("3-juntas", "2+1"):
+            continue
+        est = _estructura_bloques("CLAS", 3, opcion)
+        s.cantidad_bloques_necesarios = est["cantidad"]
+        s.tipos_bloques_necesarios = est["tipos"]
+        s.duracion_bloque = est["duracion"]
+        s.distribucion_indefinida = est["indefinida"]
+    for sid, dur in overrides.get("duracion", {}).items():
+        s = sec_by_id.get(sid)
+        if not s or dur not in ("1h", "2h"):
+            continue
+        s.duracion_bloque = dur
+        s.tipos_bloques_necesarios = []
+
+
 def _solve_sync(req: SolveRequest) -> None:
     try:
         _set_progress("Cargando datos…")
         datos = cargar_datos(INPUTS_DIR)
+        # Candidatos a decisión (del parse fresco, antes de aplicar overrides) y luego
+        # aplicar las decisiones ya tomadas por el usuario.
+        _state["decisiones_cand"] = _candidatos_decision(datos)
+        _aplicar_overrides(datos, _state["overrides"])
         _state["datos"] = datos
 
         _set_progress("Generando el mejor horario posible…")
@@ -401,12 +482,14 @@ def get_results():
         )
     reporte = _build_reporte(_state["reporte"]) if _state["reporte"] else None
     diagnostico = _build_diagnostico(_state["diagnostico"]) if _state["diagnostico"] else None
+    decisiones = _build_decisiones(_state["decisiones_cand"], _state["overrides"])
     return SolveResult(
         estado=_state["estado"] or "FACTIBLE",
         metricas=metricas,
         secciones=secciones,
         reporte=reporte,
         diagnostico=diagnostico,
+        decisiones=decisiones,
     )
 
 
@@ -490,6 +573,31 @@ def editar_mover(req: MoverRequest):
         seccion=seccion,
         conflictos=[ConflictoItem(**c) for c in conflictos],
     )
+
+
+@router.post("/decisiones/distribucion", response_model=list[DecisionSeccion])
+def set_distribucion(req: DecisionRequest):
+    """
+    Registra la distribución elegida para una CLAS de 3h sin definir ("3-juntas" | "2+1").
+    No re-resuelve: el cambio se aplica al regenerar el horario (POST /solve). Devuelve la
+    lista de decisiones actualizada.
+    """
+    if req.opcion not in ("3-juntas", "2+1"):
+        raise HTTPException(status_code=400, detail="Opción inválida (usa '3-juntas' o '2+1').")
+    _state["overrides"]["distribucion"][req.sec_id] = req.opcion
+    return _build_decisiones(_state["decisiones_cand"], _state["overrides"])
+
+
+@router.post("/decisiones/duracion", response_model=list[DecisionSeccion])
+def set_duracion(req: DecisionRequest):
+    """
+    Registra la duración elegida para un componente de 1h ("1h" | "2h"). No re-resuelve;
+    se aplica al regenerar (POST /solve). Devuelve la lista de decisiones actualizada.
+    """
+    if req.opcion not in ("1h", "2h"):
+        raise HTTPException(status_code=400, detail="Opción inválida (usa '1h' o '2h').")
+    _state["overrides"]["duracion"][req.sec_id] = req.opcion
+    return _build_decisiones(_state["decisiones_cand"], _state["overrides"])
 
 
 @router.get("/export")

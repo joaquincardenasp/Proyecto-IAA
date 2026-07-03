@@ -45,10 +45,12 @@ def test_step3_plan_comun_ici(datos):
         c.codigo for c in datos.cursos.values()
         if any(car in c.semestres_por_carrera for car in CARRERAS)
     }
-    secciones_esperadas = [s for s in datos.secciones if s.codigo_curso in codigos_restringidos]
+    # Se excluyen las de distribución indefinida (3h sin definir): no se programan.
+    secciones_esperadas = [s for s in datos.secciones
+                           if s.codigo_curso in codigos_restringidos and not s.distribucion_indefinida]
     check(
         len(resultado.asignaciones) == len(secciones_esperadas),
-        f"Todas las secciones asignadas "
+        f"Todas las secciones programables asignadas "
         f"({len(resultado.asignaciones)}/{len(secciones_esperadas)})",
     )
 

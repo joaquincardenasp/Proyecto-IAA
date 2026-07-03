@@ -269,7 +269,12 @@ def resolver(
             for c in datos.cursos.values()
             if any(car in c.semestres_por_carrera for car in carreras)
         }
-        secciones = [s for s in datos.secciones if s.codigo_curso in codigos_restringidos]
+        # Se excluyen las secciones con distribución indefinida (CLAS de 3h sin definir):
+        # no se programan hasta que el usuario elija 3-juntas o 2+1.
+        secciones = [
+            s for s in datos.secciones
+            if s.codigo_curso in codigos_restringidos and not s.distribucion_indefinida
+        ]
 
     fijas_ids = set(fijadas)
 
@@ -299,8 +304,9 @@ def resolver(
                 filtro = {"1h": BLOQUES_1H, "2h": BLOQUES_2H_SET, "3h": BLOQUES_3H_SET}.get(tipos[k])
                 dom_k = sorted(b for b in dom_base if filtro is None or b in filtro)
             else:
-                # sin tipo específico: excluir bloques de 1h (no aplican a clases normales)
-                dom_k = sorted(b for b in dom_base if b not in BLOQUES_1H)
+                # sin tipos específicos: bloques de la duración de la sección (2h, 3h o 1h).
+                # dom_base ya viene filtrado por tipo en disponibilidad_seccion; se explicita.
+                dom_k = sorted(b for b in dom_base if TODOS_BLOQUES[b].tipo == s.duracion_bloque)
             if not dom_k:
                 return ResultadoSolver(estado="INFEASIBLE")
             vars_seccion.append(
@@ -591,7 +597,8 @@ def resolver_por_partes(
         c.codigo for c in datos.cursos.values()
         if any(car in c.semestres_por_carrera for car in carreras)
     }
-    todas = [s for s in datos.secciones if s.codigo_curso in codigos]
+    todas = [s for s in datos.secciones
+             if s.codigo_curso in codigos and not s.distribucion_indefinida]
     sec_by_id = {s.id: s for s in todas}
     unidades = _construir_unidades(datos, todas, carreras)
 

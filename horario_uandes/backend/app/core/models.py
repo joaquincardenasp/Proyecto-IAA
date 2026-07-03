@@ -56,6 +56,9 @@ class Seccion:
     cantidad_bloques_necesarios: int = 1
     tipos_bloques_necesarios: list[str] = field(default_factory=list)  # [] = normal; ["2h","1h"] = 2+1
     duracion_bloque: str = "2h"
+    # True = CLAS de 3h sin distribución definida (3-juntas vs 2+1): NO se programa hasta
+    # que el usuario elija la distribución (no se adivina). Ver parser._estructura_bloques.
+    distribucion_indefinida: bool = False
     bloques_asignados: list = field(default_factory=list)
 
 

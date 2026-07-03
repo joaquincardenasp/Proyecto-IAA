@@ -63,16 +63,22 @@ semestre— sí se registra.
   - Si hay `RUT PROFESOR LABT` → ese profesor, `afecta_disponibilidad=True`.
   - Si **no** hay profesor de lab → profesor = `RUT PROFESOR 1` solo como referencia, `afecta_disponibilidad=False` (se asume TA).
 
-**Cálculo de bloques necesarios:** `ceil(horas/2)` (bloques de 2h), o `1` para distribución
-"3"/"3-juntas". Un mismo curso en varias filas (distintos planes) **acumula semestres**
-(unión de sets); las secciones se crean una sola vez por `(codigo, seccion, componente)`.
+**Estructura de bloques por sección** (`_estructura_bloques`): una sola función traduce
+`(horas a programar, distribución)` garantizando el invariante **`cantidad × duración = horas`**.
+La columna de distribución (`2+1 o 3?`) **solo aplica a secciones de 3 horas**:
 
-**Duración de bloque por sección** (`duracion_bloque` / `tipos_bloques_necesarios`): `"3h"`
-solo si la distribución es `"3"/"3-juntas"` y el componente tiene ≥3 horas; el resto es `"2h"`.
-La distribución **`"2+1"`** está implementada: la sección lleva
-`tipos_bloques_necesarios=["2h","1h"]` y el resolver filtra el dominio por tipo para cada
-variable (una va a bloques de 2h, la otra a bloques de 1h; no se solapan). El solver solo
-asigna a cada variable de la sección bloques de **su** tipo (ver RD6).
+| Caso | Resultado |
+|------|-----------|
+| CLAS 3h, `"3"/"3-juntas"` | 1 bloque de 3h |
+| CLAS 3h, `"2+1"` | 2 bloques: uno de 2h + uno de 1h (`tipos_bloques_necesarios=["2h","1h"]`) |
+| CLAS 3h, **distribución vacía** | **`distribucion_indefinida=True`** → NO se programa; el usuario debe elegir 3-juntas o 2+1 (no se adivina). Aviso al usuario. |
+| horas ≠ 3 (cualquier componente) | se **ignora** la distribución → `ceil(horas/2)` bloques de 2h. Si venía con marcador, aviso de inconsistencia. |
+| horas == 1 | 1 bloque de **1h** (aviso: componente de 1h, inusual, editable a 2h) |
+| AYUD/LABT 3h | 1 bloque de 3h |
+
+El solver **excluye** las secciones `distribucion_indefinida` (no se programan hasta definirse).
+Un mismo curso en varias filas (distintos planes) **acumula semestres** (unión de sets); las
+secciones se crean una sola vez por `(codigo, seccion, componente)`.
 
 ### 1.3 Tipo de profesor y disponibilidad
 
@@ -300,7 +306,14 @@ el resto no cambia). No bloquea el movimiento: informa los conflictos y el usuar
 | GET | `/report` | Solo el reporte de violaciones. |
 | POST | `/editar/bloques-validos` | Candidatos verde/rojo para mover un bloque. |
 | POST | `/editar/mover` | Aplica el movimiento, revalida y regenera reporte + Excel. |
+| POST | `/decisiones/distribucion` | Registra la distribución de una CLAS de 3h ("3-juntas"/"2+1"); se aplica al regenerar. |
+| POST | `/decisiones/duracion` | Registra la duración de un componente de 1h ("1h"/"2h"). |
 | GET | `/export` | Descarga el `.xlsx` generado. |
+
+`SolveResult.decisiones` lista las secciones que requieren decisión (CLAS de 3h sin
+distribución → no se programan hasta elegir) o admiten un ajuste (componentes de 1h). Las
+decisiones se guardan como *overrides* en el estado y se aplican en la siguiente regeneración
+(`POST /solve`), de modo que el usuario puede fijar varias y regenerar una sola vez.
 
 > **Nota:** la re-subida del Excel editado (revalidación por archivo) está **diferida**;
 > la edición se hace hoy con el flujo interactivo de §5.3.
@@ -366,3 +379,15 @@ sin solaparse lo desalienta RB4 (blanda). Si el cliente lo exige, podría volver
 Las ediciones "click-para-mover" viven en memoria (`_state`). Un despliegue real querría
 persistirlas, soportar **deshacer/historial**, y recomputar métricas (fitness) tras cada
 movimiento (hoy quedan algo desactualizadas respecto al horario editado).
+
+### 6.8 Mostrar los destinos descartados con su motivo (editor)
+
+Al mover un bloque, `bloques_validos` solo lista los candidatos **factibles en principio para
+la sección** (su dominio: `disponibilidad_seccion` filtrado por tipo). Los bloques que
+incumplen una restricción **de dominio** de la propia sección —duración/tipo (RD6), profesor
+no disponible (RD2), AYUD antes de 12:30 (RD7), ventana protegida de minor (RD8)— **no
+aparecen en absoluto** (ni verde ni rojo); los que sí caben pero chocan con otra sección
+(RD1/RD3/RD4/NRC/intra) aparecen en rojo con el motivo. La contrapartida: el usuario no ve
+*por qué* un destino no está disponible. **Propuesta:** mostrar también esos bloques
+descartados en gris/deshabilitados con su razón ("profesor no disponible", "duración no
+coincide", "horario protegido de minor"), en vez de omitirlos, para que el motivo sea visible.

@@ -55,10 +55,12 @@ def test_step2_plan_comun(datos):
         c.codigo for c in datos.cursos.values()
         if "Plan Común" in c.semestres_por_carrera
     }
-    secciones_pc = [s for s in datos.secciones if s.codigo_curso in codigos_pc]
+    # Se excluyen las de distribución indefinida (3h sin definir): no se programan.
+    secciones_pc = [s for s in datos.secciones
+                    if s.codigo_curso in codigos_pc and not s.distribucion_indefinida]
     check(
         len(resultado.asignaciones) == len(secciones_pc),
-        f"Todas las secciones Plan Común asignadas "
+        f"Todas las secciones Plan Común programables asignadas "
         f"({len(resultado.asignaciones)}/{len(secciones_pc)})",
     )
 

@@ -88,12 +88,26 @@ export interface DiagnosticoResult {
   unidades: DiagnosticoUnidad[]
 }
 
+export interface DecisionSeccion {
+  sec_id: string
+  codigo: string
+  titulo: string
+  seccion: string
+  profesor: string
+  tipo: 'distribucion' | 'duracion_1h'
+  opciones: string[]        // ["3-juntas","2+1"] | ["1h","2h"]
+  actual: string            // opción vigente ("" si aún no se elige)
+  requerida: boolean        // true = bloquea la programación
+  mensaje: string
+}
+
 export interface SolveResult {
   estado: EstadoSolve
   metricas?: MetricasResult
   secciones: SeccionAsignada[]
   reporte?: ReporteDetallado
   diagnostico?: DiagnosticoResult
+  decisiones: DecisionSeccion[]
 }
 
 export interface StatusResponse {

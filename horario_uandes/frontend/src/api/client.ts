@@ -3,6 +3,7 @@ import type {
   StatusResponse,
   BloquesValidosResponse,
   MoverResponse,
+  DecisionSeccion,
 } from '../types'
 
 // En desarrollo: BASE = '/api'  →  Vite proxea a http://localhost:8000/api
@@ -71,5 +72,27 @@ export async function postMover(
   }
   return r.json()
 }
+
+async function _postDecision(
+  ruta: 'distribucion' | 'duracion',
+  secId: string,
+  opcion: string,
+): Promise<DecisionSeccion[]> {
+  const r = await fetch(`${BASE}/decisiones/${ruta}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sec_id: secId, opcion }),
+  })
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}))
+    throw new Error((err as { detail?: string }).detail ?? `Error ${r.status}`)
+  }
+  return r.json()
+}
+
+export const setDistribucion = (secId: string, opcion: string) =>
+  _postDecision('distribucion', secId, opcion)
+export const setDuracion = (secId: string, opcion: string) =>
+  _postDecision('duracion', secId, opcion)
 
 export const EXPORT_URL = `${BASE}/export`
