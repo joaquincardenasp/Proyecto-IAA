@@ -722,6 +722,19 @@ def _autosave() -> None:
 
 
 def _pl_info(pl: "dbm.Planificacion") -> PlanificacionInfo:
+    # Estado derivado del autoguardado (barato: solo parsea el JSON ya guardado).
+    tiene, estado_h, n_sec, n_conf = False, "", 0, 0
+    auto = next((v for v in pl.versiones if v.es_autosave), None)
+    if auto and auto.estado_json:
+        try:
+            d = json.loads(auto.estado_json)
+            asig = d.get("asignaciones") or {}
+            n_sec = len(asig)
+            tiene = n_sec > 0
+            estado_h = d.get("estado") or ""
+            n_conf = ((d.get("reporte") or {}).get("resumen") or {}).get("total_duras", 0)
+        except Exception:
+            pass
     return PlanificacionInfo(
         id=pl.id, nombre=pl.nombre,
         creada=pl.creada.isoformat() if pl.creada else "",
@@ -729,6 +742,7 @@ def _pl_info(pl: "dbm.Planificacion") -> PlanificacionInfo:
         maestro_nombre=pl.maestro_nombre or "", salas_nombre=pl.salas_nombre or "",
         n_versiones=sum(1 for v in pl.versiones if not v.es_autosave),
         activa=(pl.id == _state.get("planificacion_id")),
+        tiene_horario=tiene, estado_horario=estado_h, n_secciones=n_sec, n_conflictos=n_conf,
     )
 
 

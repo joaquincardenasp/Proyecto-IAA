@@ -163,6 +163,10 @@ export interface PlanificacionInfo {
   salas_nombre: string
   n_versiones: number
   activa: boolean
+  tiene_horario: boolean
+  estado_horario: string   // FACTIBLE | PARCIAL | INFEASIBLE | ""
+  n_secciones: number
+  n_conflictos: number
 }
 
 export interface VersionInfo {

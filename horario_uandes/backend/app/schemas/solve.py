@@ -150,6 +150,11 @@ class PlanificacionInfo(BaseModel):
     salas_nombre: str = ""
     n_versiones: int = 0
     activa: bool = False
+    # Estado derivado del autoguardado (para las tarjetas del inicio)
+    tiene_horario: bool = False
+    estado_horario: str = ""          # FACTIBLE | PARCIAL | INFEASIBLE | ""
+    n_secciones: int = 0
+    n_conflictos: int = 0             # violaciones duras del reporte
 
 
 class VersionInfo(BaseModel):
